@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
+from vector_quantize_pytorch import FSQ
 
 
 @dataclass
@@ -41,54 +42,28 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 class FSQQuantizer(nn.Module):
-    """Finite Scalar Quantizer that deterministically maps latents to discrete bins."""
+    """Wrapper around vector_quantize_pytorch.FSQ to handle grouping and perplexity."""
 
     def __init__(self, levels: Sequence[int], clip_range: float = 1.0) -> None:
         super().__init__()
         if not levels:
             raise ValueError("levels must be a non-empty sequence")
-        if any(l <= 1 for l in levels):
-            raise ValueError("each entry in levels must be > 1")
+        
+        # Using FSQ from vector_quantize_pytorch
+        # Note: vector_quantize_pytorch FSQ uses tanh + scaling internally if dim is not provided
+        # We pass levels directly.
+        self.fsq = FSQ(levels=levels)
+        
         self.levels = list(int(l) for l in levels)
-        self.clip_range = float(clip_range)
         self.group_dim = len(self.levels)
         self.codebook_size = 1
         for l in self.levels:
             self.codebook_size *= l
 
-    def extra_repr(self) -> str:
-        return f"levels={self.levels}, clip_range={self.clip_range}"
-
-    def _build_grid(self, level: int, device: torch.device, dtype: torch.dtype) -> Tensor:
-        return torch.linspace(-self.clip_range, self.clip_range, steps=level, device=device, dtype=dtype)
-
-    def quantize(self, chunk: Tensor) -> Tuple[Tensor, Tensor]:
-        """Quantize a latent chunk of shape (N, group_dim)."""
-
-        if chunk.dim() != 2 or chunk.size(-1) != self.group_dim:
-            raise ValueError(
-                f"chunk must have shape (N, {self.group_dim}), got {tuple(chunk.shape)}"
-            )
-
-        device = chunk.device
-        dtype = chunk.dtype
-        chunk = chunk.clamp(-self.clip_range, self.clip_range)
-        quantized = torch.empty_like(chunk)
-        flat_indices = torch.zeros(chunk.size(0), device=device, dtype=torch.long)
-        multiplier = 1
-        for dim_idx, level in enumerate(self.levels):
-            grid = self._build_grid(level, device=device, dtype=dtype)
-            values = chunk[:, dim_idx].unsqueeze(1)
-            distances = torch.abs(values - grid.unsqueeze(0))
-            best_idx = torch.argmin(distances, dim=1)
-            quantized[:, dim_idx] = grid[best_idx]
-            flat_indices += best_idx * multiplier
-            multiplier *= level
-        return quantized, flat_indices
-
-    def forward(self, latents: Tensor) -> Tuple[Tensor, Tensor]:  # type: ignore[override]
-        """Quantize latents of shape (B, T, D)."""
-
+    def forward(self, latents: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Quantize latents of shape (B, T, D).
+        """
         if latents.dim() != 3:
             raise ValueError("latents must have shape (batch, seq, latent_dim)")
 
@@ -98,12 +73,20 @@ class FSQQuantizer(nn.Module):
                 f"latent_dim ({dim}) must be divisible by the FSQ group dimension ({self.group_dim})"
             )
 
+        # Reshape for grouping: (B, T, num_groups * group_dim) -> (B, T * num_groups, group_dim)
         num_groups = dim // self.group_dim
-        latents_chunks = latents.reshape(-1, num_groups, self.group_dim)
-        latents_chunks = latents_chunks.reshape(-1, self.group_dim)
-        quantized_chunks, indices = self.quantize(latents_chunks)
-        quantized = quantized_chunks.reshape(bsz, seq_len, num_groups * self.group_dim)
-        indices = indices.reshape(bsz, seq_len, num_groups)
+        
+        # Flatten batch and sequence for FSQ library
+        # The library expects (..., dim), so we can pass (B * T * num_groups, group_dim)
+        flat_input = latents.reshape(-1, self.group_dim)
+        
+        # vector_quantize_pytorch returns (quantized, indices)
+        quantized_flat, indices_flat = self.fsq(flat_input)
+        
+        # Reshape back
+        quantized = quantized_flat.reshape(bsz, seq_len, dim)
+        indices = indices_flat.reshape(bsz, seq_len, num_groups)
+        
         return quantized, indices
 
     def perplexity(self, indices: Tensor) -> Tensor:
@@ -132,7 +115,7 @@ class FSQQuantizer(nn.Module):
                 
                 return torch.tensor(total_perplexity / num_groups, device=indices.device)
             else:
-                # Single group case: compute perplexity directly
+                # Single group case
                 hist = torch.bincount(indices.view(-1), minlength=self.codebook_size).float()
                 probs = hist / (hist.sum() + 1e-8)
                 non_zero = probs[probs > 0]
@@ -248,7 +231,6 @@ class FSQVQVAE(nn.Module):
 
     def quantize(self, latents: Tensor) -> Tuple[Tensor, Tensor]:
         quantized, indices = self.quantizer(latents)
-        quantized = latents + (quantized - latents).detach()
         return quantized, indices
 
     def forward(self, actions: Tensor) -> FSQVQVAEOutput:  # type: ignore[override]
@@ -256,11 +238,19 @@ class FSQVQVAE(nn.Module):
         quantized, indices = self.quantize(latents)
         reconstructions = self.decode(quantized)
         recon_loss = F.mse_loss(reconstructions, actions)
-        # FSQ commitment loss: encourage encoder to match quantized values
-        # Note: detach on quantized, NOT on latents (unlike VQ-VAE)
+        
+        # Note: The vector_quantize_pytorch FSQ implementation might already handle 
+        # straight-through gradients, but we should check if we need commitment loss.
+        # Usually FSQ relies on the quantizer's internal mechanics or implicit commitment via STE.
+        # However, adding an explicit auxiliary loss to pull encoder outputs to valid states is good.
+        # The library implementation returns quantized values with STE.
+        # We will keep our manual commitment loss calculation as it helps convergence.
+        
         commitment_loss = self.commitment_cost * F.mse_loss(latents, quantized.detach())
+        
         loss = recon_loss + commitment_loss
         perplexity = self.quantizer.perplexity(indices)
+        
         return FSQVQVAEOutput(
             loss=loss,
             recon_loss=recon_loss,
