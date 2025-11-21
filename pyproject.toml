@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vqvae-latent-actions"
+version = "0.1.0"
+description = "Training pipeline for FSQ-based VQ-VAE models for robotic action tokenization"
+authors = [{name = "SberRobotics"}]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "hydra-core",
+  "accelerate",
+  "clearml",
+  "omegaconf",
+  "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["black", "ruff"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["vqvae_latent_actions", "vqvae_latent_actions.models", "vqvae_latent_actions.training", "vqvae_latent_actions.utils"]
+
+[tool.ruff]
+line-length = 100
+

@@ -1,0 +1,43 @@
+defaults:
+  - model: fsq_vqvae
+  - _self_
+
+seed: 42
+
+experiment_name: fsq_vqvae_initial
+
+trainer:
+  num_steps: 100000
+  log_interval: 100
+  val_interval: 3000
+  save_interval: 25000
+  gradient_accumulation_steps: null
+  mixed_precision: "bf16"
+  max_grad_norm: 1.0
+  output_dir: ${hydra:experiment_name}
+
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+
+scheduler:
+  warmup_steps: 1000
+  total_steps: ${trainer.num_steps}
+  min_lr: 1.0e-5
+
+dataset:
+  batch_size: 128
+
+clearml:
+  enable: true
+  project_name: vqvae-latent-actions
+  task_name: ${hydra:experiment_name}
+  tags: ["vqvae"]
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d_%H-%M-%S}
+  job_logging:
+    root:
+      level: INFO
