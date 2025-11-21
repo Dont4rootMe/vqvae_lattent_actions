@@ -3,9 +3,9 @@ _target_: vqvae_latent_actions.models.FSQVQVAE
 action_dim: null
 latent_dim: 256
 hidden_dim: 512
-num_heads: 8
-num_encoder_layers: 4
-num_decoder_layers: 4
+num_heads: 4
+num_encoder_layers: 6
+num_decoder_layers: 6
 fsq_levels: [7, 7, 7, 7]
 commitment_cost: 0.25
 dropout: 0.1
