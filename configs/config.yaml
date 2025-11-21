@@ -14,7 +14,7 @@ trainer:
   gradient_accumulation_steps: null
   mixed_precision: "bf16"
   max_grad_norm: 1.0
-  output_dir: ${hydra:experiment_name}
+  output_dir: outputs/${experiment_name}/${now:%Y-%m-%d_%H-%M-%S}
 
 optimizer:
   lr: 3.0e-4
@@ -37,7 +37,7 @@ clearml:
 
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d_%H-%M-%S}
+    dir: outputs/${experiment_name}/${now:%Y-%m-%d_%H-%M-%S}
   job_logging:
     root:
       level: INFO

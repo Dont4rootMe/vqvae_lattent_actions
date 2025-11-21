@@ -30,20 +30,31 @@ def _log_train_metrics(
     lr: float,
     step: int,
 ) -> None:
-    metrics = {
-        "loss": outputs.loss.detach(),
-        "recon_loss": outputs.recon_loss.detach(),
-        "commitment_loss": outputs.commitment_loss.detach(),
-        "perplexity": outputs.perplexity.detach(),
-        "lr": torch.tensor(lr, device=accelerator.device),
-    }
+    
+    metrics = {'lr': torch.tensor(lr, device=accelerator.device)}
+    
+    if hasattr(outputs, '__dataclass_fields__'):
+        field_names = outputs.__dataclass_fields__.keys()
+    else:
+        field_names = [name for name in dir(outputs) if not name.startswith("_")]
+    
+    for name in field_names:
+        value = getattr(outputs, name)
+        # Only process tensor attributes
+        if isinstance(value, torch.Tensor):
+            value = value.detach()
+            # Only log scalars or 1D tensors
+            if value.dim() <= 1:
+                metrics[name] = value
+
     reduced = {}
-    for name, value in metrics.items():
+    for name, value in sorted(metrics.items(), key=lambda x: x[0]):
         tensor = value if isinstance(value, torch.Tensor) else torch.tensor(value, device=accelerator.device)
         gathered = accelerator.gather(tensor.detach())
-        reduced[name] = gathered.mean().item()
-    logger.log("train", reduced, step)
-
+        reduced[name] = gathered.mean().item()        
+    if accelerator.is_main_process:
+        logger.log("train", reduced, step)
+    
 
 def _save_checkpoint(
     model: FSQVQVAE,
@@ -106,19 +117,21 @@ def run_train_loop(
         with accelerator.accumulate(model):
             outputs = model.compute_loss(batch)
             accelerator.backward(outputs.loss)
+            
             if accelerator.sync_gradients and grad_clip is not None:
                 accelerator.clip_grad_norm_(model.parameters(), grad_clip)
+                
             optimizer.step()
             optimizer.zero_grad()
+            
             if scheduler is not None:
                 scheduler.step()
 
         global_step += 1
-
-        if accelerator.sync_gradients:
+        
+        if global_step % log_interval == 0 and accelerator.sync_gradients:
             current_lr = optimizer.param_groups[0]["lr"]
-            if global_step % log_interval == 0:
-                _log_train_metrics(accelerator, metric_logger, outputs, current_lr, global_step)
+            _log_train_metrics(accelerator, metric_logger, outputs, current_lr, global_step)
 
         if val_interval > 0 and global_step % val_interval == 0:
             per_dataset_metrics, aggregated_metrics = evaluate(model, dataloader_val, accelerator)
