@@ -8,9 +8,9 @@ experiment_name: fsq_vqvae_initial
 
 trainer:
   num_steps: 100000
-  log_interval: 100
-  val_interval: 3000
-  save_interval: 25000
+  log_interval: 10
+  val_interval: 500
+  save_interval: 1000
   gradient_accumulation_steps: null
   mixed_precision: "bf16"
   max_grad_norm: 1.0
@@ -18,7 +18,7 @@ trainer:
 
 optimizer:
   lr: 3.0e-4
-  weight_decay: 0.0
+  weight_decay: 0.2
   betas: [0.9, 0.999]
 
 scheduler:

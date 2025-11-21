@@ -18,6 +18,8 @@ from ..training.eval import evaluate
 from ..utils.logging import MetricLogger
 from ..utils.metrics import ValidationCurveTracker
 
+from tqdm import tqdm
+
 
 def _move_batch_to_device(batch: Dict, device: torch.device) -> Dict:
     return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
@@ -106,16 +108,21 @@ def run_train_loop(
 
     train_iterator = iter(dataloader_train)
 
+
+    pbar = tqdm(total=max_steps, desc="Training", leave=False)
     while global_step < max_steps:
         try:
             batch = next(train_iterator)
+            pbar.update(1)
         except StopIteration:
             train_iterator = iter(dataloader_train)
             batch = next(train_iterator)
+            pbar.update(1)
 
         batch = _move_batch_to_device(batch, accelerator.device)
+        
         with accelerator.accumulate(model):
-            outputs = model.compute_loss(batch)
+            outputs = model(batch["actions"])
             accelerator.backward(outputs.loss)
             
             if accelerator.sync_gradients and grad_clip is not None:
