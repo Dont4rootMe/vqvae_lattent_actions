@@ -107,12 +107,37 @@ class FSQQuantizer(nn.Module):
         return quantized, indices
 
     def perplexity(self, indices: Tensor) -> Tensor:
+        """
+        Compute perplexity averaged across all groups.
+        
+        Args:
+            indices: Tensor of shape (batch, seq, num_groups) containing discrete codes
+        
+        Returns:
+            Scalar tensor with average perplexity across all groups
+        """
         with torch.no_grad():
-            hist = torch.bincount(indices.view(-1), minlength=self.codebook_size).float()
-            probs = hist / (hist.sum() + 1e-8)
-            non_zero = probs[probs > 0]
-            entropy = -(non_zero * torch.log(non_zero)).sum()
-            return torch.exp(entropy)
+            if indices.dim() == 3:
+                # Multi-group case: compute perplexity for each group separately
+                batch_size, seq_len, num_groups = indices.shape
+                total_perplexity = 0.0
+                
+                for group_idx in range(num_groups):
+                    group_indices = indices[:, :, group_idx].reshape(-1)
+                    hist = torch.bincount(group_indices, minlength=self.codebook_size).float()
+                    probs = hist / (hist.sum() + 1e-8)
+                    non_zero = probs[probs > 0]
+                    entropy = -(non_zero * torch.log(non_zero)).sum()
+                    total_perplexity += torch.exp(entropy).item()
+                
+                return torch.tensor(total_perplexity / num_groups, device=indices.device)
+            else:
+                # Single group case: compute perplexity directly
+                hist = torch.bincount(indices.view(-1), minlength=self.codebook_size).float()
+                probs = hist / (hist.sum() + 1e-8)
+                non_zero = probs[probs > 0]
+                entropy = -(non_zero * torch.log(non_zero)).sum()
+                return torch.exp(entropy)
 
 
 class TransformerBackbone(nn.Module):
@@ -231,7 +256,9 @@ class FSQVQVAE(nn.Module):
         quantized, indices = self.quantize(latents)
         reconstructions = self.decode(quantized)
         recon_loss = F.mse_loss(reconstructions, actions)
-        commitment_loss = self.commitment_cost * F.mse_loss(latents.detach(), quantized)
+        # FSQ commitment loss: encourage encoder to match quantized values
+        # Note: detach on quantized, NOT on latents (unlike VQ-VAE)
+        commitment_loss = self.commitment_cost * F.mse_loss(latents, quantized.detach())
         loss = recon_loss + commitment_loss
         perplexity = self.quantizer.perplexity(indices)
         return FSQVQVAEOutput(

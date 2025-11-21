@@ -105,6 +105,8 @@ def run_train_loop(
     val_interval = cfg.trainer.val_interval
     save_interval = cfg.trainer.save_interval
     grad_clip = cfg.trainer.max_grad_norm
+    
+    max_eval_batches = cfg.trainer.max_eval_batches
 
     train_iterator = iter(dataloader_train)
 
@@ -141,29 +143,46 @@ def run_train_loop(
             _log_train_metrics(accelerator, metric_logger, outputs, current_lr, global_step)
 
         if val_interval > 0 and global_step % val_interval == 0:
-            per_dataset_metrics, aggregated_metrics = evaluate(model, dataloader_val, accelerator)
-            for dataset_name, metrics in per_dataset_metrics.items():
-                metric_logger.log(f"val/{dataset_name}", metrics, global_step)
-            if aggregated_metrics:
-                metric_logger.log("val", aggregated_metrics, global_step)
-                tracker.update(global_step, aggregated_metrics)
-                fig = tracker.plot()
-                fig_path = plot_dir / f"val_metrics_step_{global_step}.png"
-                fig.savefig(fig_path)
-                metric_logger.log_figure("validation", f"step_{global_step}", fig, global_step)
-                os.environ["LAST_VAL_FIG"] = str(fig_path)
-                plt.close(fig)
-            if aggregated_metrics and aggregated_metrics.get("loss", math.inf) < best_val:
-                best_val = aggregated_metrics["loss"]
-                _save_checkpoint(
-                    model,
-                    optimizer,
-                    scheduler,
-                    accelerator,
-                    output_dir,
-                    global_step,
-                    tag="best",
-                )
+            # All processes participate in evaluation for speed
+            per_dataset_metrics, aggregated_metrics, metric_names = evaluate(model, dataloader_val, accelerator, max_eval_batches)
+            
+            # Only main process logs and saves
+            if accelerator.is_main_process:
+                # plot comparision of val metrics on datasets
+                for metric_name in metric_names:
+                    consolidation = {}
+                    for dataset_name, metrics in per_dataset_metrics.items():
+                        consolidation[dataset_name] = metrics[metric_name]
+                    metric_logger.log(f"val-consolidated/{metric_name}", consolidation, global_step, in_one_praph=True)
+                
+                # plot sepparately for each dataset
+                for dataset_name, metrics in per_dataset_metrics.items():
+                    metric_logger.log(f"val-dataset/{dataset_name}", metrics, global_step)
+                
+                # if aggregated_metrics:
+                #     metric_logger.log("val-aggregation", aggregated_metrics, global_step)
+                #     tracker.update(global_step, aggregated_metrics)
+                    
+                #     fig = tracker.plot()
+                #     fig_path = plot_dir / f"val_metrics_step_{global_step}.png"
+                #     fig.savefig(fig_path)
+                #     metric_logger.log_figure("validation", f"step_{global_step}", fig, global_step)
+                #     os.environ["LAST_VAL_FIG"] = str(fig_path)
+                #     plt.close(fig)
+                # if aggregated_metrics and aggregated_metrics.get("loss", math.inf) < best_val:
+                #     best_val = aggregated_metrics["loss"]
+                #     _save_checkpoint(
+                #         model,
+                #         optimizer,
+                #         scheduler,
+                #         accelerator,
+                #         output_dir,
+                #         global_step,
+                #         tag="best",
+                #     )
+            
+            # Synchronize all processes after validation
+            accelerator.wait_for_everyone()
 
         if save_interval > 0 and global_step % save_interval == 0:
             _save_checkpoint(

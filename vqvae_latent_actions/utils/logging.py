@@ -34,9 +34,13 @@ class ClearMLLogger:
         )
         self.logger = self.task.get_logger()
 
-    def log_metrics(self, split: str, metrics: Dict[str, float], step: int) -> None:
-        for name, value in metrics.items():
-            self.logger.report_scalar(title=split, series=name, value=value, iteration=step)
+    def log_metrics(self, split: str, metrics: Dict[str, float], step: int, in_one_praph=False) -> None:
+        if in_one_praph:
+            for name, value in metrics.items():
+                self.logger.report_scalar(title=split, series=name, value=value, iteration=step)
+        else:
+            for name, value in metrics.items():
+                self.logger.report_scalar(title=f"{split}/{name}", series=name, value=value, iteration=step)
 
     def log_figure(self, title: str, series: str, figure, step: int) -> None:
         self.logger.report_matplotlib_figure(title=title, series=series, figure=figure, iteration=step)
@@ -49,12 +53,12 @@ class MetricLogger:
         self.accelerator = accelerator
         self.clearml_logger = clearml_logger
 
-    def log(self, split: str, metrics: Dict[str, float], step: int) -> None:
+    def log(self, split: str, metrics: Dict[str, float], step: int, in_one_praph=False) -> None:
         if self.accelerator.is_main_process:
-            msg = f"[{split}] step={step} " + " ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
-            self.accelerator.print(msg)
+            # msg = f"[{split}] step={step} " + " ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
+            # self.accelerator.print(msg)
             if self.clearml_logger is not None:
-                self.clearml_logger.log_metrics(split, metrics, step)
+                self.clearml_logger.log_metrics(split, metrics, step, in_one_praph)
 
     def log_figure(self, title: str, series: str, figure, step: int) -> None:
         if self.accelerator.is_main_process and self.clearml_logger is not None:

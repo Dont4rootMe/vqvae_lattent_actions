@@ -352,8 +352,8 @@ def get_datasets() -> Tuple[Any, Any, Any, Any]:
     assets_dir = "/mnt/virtual_ai0001071-01239_SR006-nfs2/apanasevich/pi0_assets_v4"
     cfg = torch.load("config.ckpt", weights_only=False)
     
-    cfg.robotics_dataset.data_configs = cfg.robotics_dataset.data_configs[:2]
-    cfg.robotics_dataset.weights = cfg.robotics_dataset.weights[:2]
+    cfg.robotics_dataset.data_configs = cfg.robotics_dataset.data_configs[:-1]
+    cfg.robotics_dataset.weights = cfg.robotics_dataset.weights[:-1]
 
     map_to_unified_space = False
     map_to_humanoid = False

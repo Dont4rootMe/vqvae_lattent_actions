@@ -11,6 +11,7 @@ trainer:
   log_interval: 10
   val_interval: 500
   save_interval: 1000
+  max_eval_batches: 3
   gradient_accumulation_steps: null
   mixed_precision: "bf16"
   max_grad_norm: 1.0
@@ -32,7 +33,7 @@ dataset:
 clearml:
   enable: true
   project_name: vqvae-latent-actions
-  task_name: ${hydra:experiment_name}
+  task_name: ${fsq_vqvae_initial}
   tags: ["vqvae"]
 
 hydra:
