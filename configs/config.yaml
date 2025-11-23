@@ -34,7 +34,7 @@ clearml:
   enable: true
   project_name: vqvae-latent-actions
   task_name: ${experiment_name}
-  tags: ["vqvae"]
+  tags: ["vqvae", "latent actions"]
 
 hydra:
   run:
