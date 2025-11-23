@@ -50,9 +50,9 @@ class FSQQuantizer(nn.Module):
             raise ValueError("levels must be a non-empty sequence")
         
         # Using FSQ from vector_quantize_pytorch
-        # Note: vector_quantize_pytorch FSQ uses tanh + scaling internally if dim is not provided
-        # We pass levels directly.
-        self.fsq = FSQ(levels=levels)
+        # The library expects (batch, seq, num_codebooks * codebook_dim) where num_codebooks=1
+        # and codebook_dim = len(levels)
+        self.fsq = FSQ(levels=levels, num_codebooks=1, dim=len(levels))
         
         self.levels = list(int(l) for l in levels)
         self.group_dim = len(self.levels)
@@ -73,19 +73,33 @@ class FSQQuantizer(nn.Module):
                 f"latent_dim ({dim}) must be divisible by the FSQ group dimension ({self.group_dim})"
             )
 
-        # Reshape for grouping: (B, T, num_groups * group_dim) -> (B, T * num_groups, group_dim)
+        # Reshape for grouping: (B, T, num_groups * group_dim) -> (B, T, num_groups, group_dim)
         num_groups = dim // self.group_dim
+        grouped = latents.reshape(bsz, seq_len, num_groups, self.group_dim)
         
-        # Flatten batch and sequence for FSQ library
-        # The library expects (..., dim), so we can pass (B * T * num_groups, group_dim)
-        flat_input = latents.reshape(-1, self.group_dim)
+        # Process each group separately
+        quantized_groups = []
+        indices_groups = []
         
-        # vector_quantize_pytorch returns (quantized, indices)
-        quantized_flat, indices_flat = self.fsq(flat_input)
+        for g in range(num_groups):
+            # Extract group: (B, T, group_dim)
+            group_input = grouped[:, :, g, :]
+            # FSQ expects (B, T, num_codebooks * codebook_dim) where num_codebooks=1
+            # So we need to add the codebook dimension
+            group_input = group_input.unsqueeze(2)  # (B, T, 1, group_dim)
+            group_input = group_input.reshape(bsz, seq_len, self.group_dim)
+            
+            # Quantize: returns (quantized, indices)
+            quantized_g, indices_g = self.fsq(group_input)
+            quantized_groups.append(quantized_g)
+            indices_groups.append(indices_g.squeeze(-1))  # Remove codebook dim from indices
         
-        # Reshape back
-        quantized = quantized_flat.reshape(bsz, seq_len, dim)
-        indices = indices_flat.reshape(bsz, seq_len, num_groups)
+        # Stack back: (B, T, num_groups, group_dim)
+        quantized = torch.stack(quantized_groups, dim=2)
+        quantized = quantized.reshape(bsz, seq_len, dim)
+        
+        # Stack indices: (B, T, num_groups)
+        indices = torch.stack(indices_groups, dim=2)
         
         return quantized, indices
 

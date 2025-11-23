@@ -25,6 +25,26 @@ def _move_batch_to_device(batch: Dict, device: torch.device) -> Dict:
     return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
 
+def _get_model_dtype(model: torch.nn.Module) -> torch.dtype:
+    param = next(model.parameters(), None)
+    if param is not None:
+        return param.dtype
+    buffer = next(model.buffers(), None)
+    if buffer is not None:
+        return buffer.dtype
+    return torch.float32
+
+
+def _ensure_actions_dtype(batch: Dict, model: torch.nn.Module) -> Dict:
+    actions = batch.get("actions")
+    if not isinstance(actions, torch.Tensor):
+        return batch
+    target_dtype = _get_model_dtype(model)
+    if actions.dtype != target_dtype:
+        batch["actions"] = actions.to(dtype=target_dtype)
+    return batch
+
+
 def _log_train_metrics(
     accelerator: Accelerator,
     logger: MetricLogger,
@@ -122,6 +142,7 @@ def run_train_loop(
             pbar.update(1)
 
         batch = _move_batch_to_device(batch, accelerator.device)
+        batch = _ensure_actions_dtype(batch, model)
         
         with accelerator.accumulate(model):
             outputs = model(batch["actions"])

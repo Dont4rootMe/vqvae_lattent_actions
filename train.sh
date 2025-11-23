@@ -6,7 +6,8 @@ accelerate launch --config_file /mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov
     model=fsq_vqvae \
     trainer.num_steps=100000 \
     dataset.batch_size=256 \
-    model.latent_dim=512 \
+    model.latent_dim=256 \
+    model.hidden_dim=512 \
     dataset.batch_size=256 \
     trainer.log_interval=5 \
     trainer.val_interval=250 \

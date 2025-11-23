@@ -33,7 +33,7 @@ dataset:
 clearml:
   enable: true
   project_name: vqvae-latent-actions
-  task_name: ${fsq_vqvae_initial}
+  task_name: ${experiment_name}
   tags: ["vqvae"]
 
 hydra:
