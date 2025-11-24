@@ -97,6 +97,7 @@ class GMBQuantizer(nn.Module):
         if deterministic:
             # Deterministic: use argmax
             indices = object_logits.argmax(dim=-1)  # [B x quant_layers]
+            quantized = self.embeddings(indices)  # [B x quant_layers x embedding_dim]
         else:
             # Stochastic: apply Gumbel-Softmax
             soft_codes = F.gumbel_softmax(
@@ -106,8 +107,9 @@ class GMBQuantizer(nn.Module):
                 dim=-1
             )  # [B x quant_layers x vocab_size]
             indices = soft_codes.argmax(dim=-1)  # [B x quant_layers]
+            # Use matmul to propagate gradients through soft_codes to object_logits
+            quantized = torch.matmul(soft_codes, self.embeddings.weight)  # [B x quant_layers x embedding_dim]
         
-        quantized = self.embeddings(indices)  # [B x quant_layers x (seq_len * (latent_dim // (quant_layers * 3)))]
         quantized_flat = quantized.reshape(batch_size, -1)  # [B x seq_len * (latent_dim // 3)]
         reconstructed_flat = self.from_codes(quantized_flat)  # [B x seq_len * latent_dim]
         reconstructed = reconstructed_flat.view(batch_size, seq_len, self.latent_dim)

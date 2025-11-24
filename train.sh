@@ -3,11 +3,11 @@ export CLEARML_CONFIG_FILE='/mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov/cle
 
 accelerate launch --config_file /mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov/accelerate_config.yaml \
     train.py \
-    model=lfq_vqvae \
+    model=gmb_vqvae \
     trainer.num_steps=100000 \
     dataset.batch_size=256 \
     model.latent_dim=256 \
-    model.hidden_dim=512 \
+    model.hidden_dim=256 \
     dataset.batch_size=256 \
     trainer.log_interval=5 \
     trainer.val_interval=250 \
@@ -15,4 +15,4 @@ accelerate launch --config_file /mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov
     trainer.save_interval=5000 \
     trainer.gradient_accumulation_steps=1 \
     trainer.mixed_precision="bf16" \
-    experiment_name=lfq_vqvae_initial
+    experiment_name=gmb_vqvae_initial
