@@ -36,19 +36,15 @@ def _ensure_actions_dtype(batch: Dict, model: torch.nn.Module) -> Dict:
 
 
 def _evaluate_single_dataloader(
-    model: FSQVQVAE,
+    model: torch.nn.Module,
     dataloader: DataLoader,
     accelerator: Accelerator,
     max_eval_batches: int | None = None
 ) -> Dict[str, float]:
     """Evaluate on a single dataloader - runs on all processes in parallel."""
     # Accumulators for local process
-    total_loss = 0.0
-    total_recon_loss = 0.0
-    total_commitment_loss = 0.0
-    total_perplexity = 0.0
-    total_samples = 0
-    num_batches = 0
+    totals: Dict[str, float] = {}
+    total_samples = 0.0
 
     for index, batch in enumerate(dataloader):
         if max_eval_batches is not None and index >= max_eval_batches:
@@ -60,44 +56,56 @@ def _evaluate_single_dataloader(
         outputs = model(actions)
         
         batch_size = actions.size(0)
-        
-        # Accumulate weighted sums
-        total_loss += outputs.loss.detach().item() * batch_size
-        total_recon_loss += outputs.recon_loss.detach().item() * batch_size
-        total_commitment_loss += outputs.commitment_loss.detach().item() * batch_size
-        total_perplexity += outputs.perplexity.detach().item()
         total_samples += batch_size
-        num_batches += 1
+        
+        # Dynamically extract metrics
+        if hasattr(outputs, '__dataclass_fields__'):
+            field_names = outputs.__dataclass_fields__.keys()
+        else:
+            field_names = [name for name in dir(outputs) if not name.startswith("_")]
+
+        for name in field_names:
+            value = getattr(outputs, name)
+            # Only accumulate scalar tensors
+            if isinstance(value, torch.Tensor) and value.numel() == 1:
+                val = value.detach().item()
+                if name not in totals:
+                    totals[name] = 0.0
+                totals[name] += val * batch_size
+
+    # Return empty if no samples or no metrics
+    if total_samples == 0 or not totals:
+        return {}
 
     # Convert to tensors for gathering
-    local_stats = torch.tensor(
-        [total_loss, total_recon_loss, total_commitment_loss, total_perplexity, float(total_samples), float(num_batches)],
-        device=accelerator.device
-    )
+    # Sort keys to ensure consistent order across processes
+    metric_names = sorted(totals.keys())
+    
+    # Construct tensor: [total_samples, val1, val2, ...]
+    local_stats = [total_samples] + [totals[name] for name in metric_names]
+    local_tensor = torch.tensor(local_stats, device=accelerator.device)
     
     # Gather from all processes
-    gathered_stats = accelerator.gather(local_stats)
+    gathered_stats = accelerator.gather(local_tensor)
     
-    # Reshape if needed: gather returns flat tensor, reshape to [num_processes, 6]
+    # Reshape if needed
     num_processes = accelerator.num_processes
     if gathered_stats.dim() == 1:
         gathered_stats = gathered_stats.reshape(num_processes, -1)
     
-    # Compute global averages (only meaningful on main process, but computed on all for consistency)
-    global_loss = gathered_stats[:, 0].sum().item()
-    global_recon_loss = gathered_stats[:, 1].sum().item()
-    global_commitment_loss = gathered_stats[:, 2].sum().item()
-    global_perplexity = gathered_stats[:, 3].sum().item()
-    global_samples = gathered_stats[:, 4].sum().item()
-    global_batches = gathered_stats[:, 5].sum().item()
+    # Compute global sums
+    global_sums = gathered_stats.sum(dim=0)
+    global_samples = global_sums[0].item()
     
-    results = {
-        "loss": global_loss / global_samples if global_samples > 0 else 0.0,
-        "recon_loss": global_recon_loss / global_samples if global_samples > 0 else 0.0,
-        "commitment_loss": global_commitment_loss / global_samples if global_samples > 0 else 0.0,
-        "perplexity": global_perplexity / global_batches if global_batches > 0 else 0.0,
-    }
-    
+    results = {}
+    if global_samples > 0:
+        for i, name in enumerate(metric_names):
+            # Index offset by 1 because 0 is total_samples
+            results[name] = global_sums[i+1].item() / global_samples
+    else:
+        for name in metric_names:
+            results[name] = 0.0
+            
     return results
 
 
