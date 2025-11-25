@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import random
+import threading
+import queue
 from typing import Any, Tuple
 
 import hydra
@@ -29,6 +31,59 @@ os.environ["OPENPI_DATA_HOME"] = (
 os.environ["HF_HOME"] = "/mnt/virtual_ai0001071-01239_SR006-nfs2/.cache/huggingface"
 os.environ["XDG_CACHE_HOME"] = "/mnt/virtual_ai0001071-01239_SR006-nfs2/.cache"
 
+
+class AsyncDataLoader:
+    """
+    A wrapper around a DataLoader that prefetches batches in a background thread.
+    This helps to overlap data loading (IO/collation) with the training loop execution.
+    """
+    def __init__(self, dataloader: DataLoader, buffer_size: int = 3):
+        self.dataloader = dataloader
+        self.buffer_size = buffer_size
+        
+    def __len__(self):
+        return len(self.dataloader)
+
+    def __iter__(self):
+        self.queue = queue.Queue(self.buffer_size)
+        self.stop_event = threading.Event()
+        self.worker_thread = threading.Thread(target=self._worker, daemon=True)
+        self.worker_thread.start()
+        return self
+
+    def _worker(self):
+        try:
+            for batch in self.dataloader:
+                if self.stop_event.is_set():
+                    break
+                self.queue.put(batch)
+            self.queue.put(None) # Sentinel for end of epoch
+        except Exception as e:
+            self.queue.put(e)
+
+    def __next__(self):
+        batch = self.queue.get()
+        
+        if isinstance(batch, Exception):
+            self._shutdown_thread()
+            raise batch
+            
+        if batch is None:
+            self._shutdown_thread()
+            raise StopIteration
+            
+        return batch
+
+    def _shutdown_thread(self):
+        self.stop_event.set()
+        # Drain queue to allow worker to potentially exit if blocked on put
+        try:
+            while not self.queue.empty():
+                self.queue.get_nowait()
+        except queue.Empty:
+            pass
+        # We don't strictly need to join here as it's a daemon thread, 
+        # but good for cleanup if we wanted strict lifecycle.
 
 def create_train_val_datasets_distributed(
     data_config_factory: Any,
@@ -388,7 +443,8 @@ def prepare_dataloaders(batch_size: int) -> Tuple[Any, DataLoader]:
     robotics_dataset, val_datasets_dict, _, _ = get_datasets()
     
     def _create_dataloader(dataset) -> DataLoader:
-        dtl = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        # Use more workers to speed up data loading
+        dtl = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, prefetch_factor=2)
         
         try:
             dtl.dataset._dataset._dataset.return_fake_images = True
@@ -398,7 +454,12 @@ def prepare_dataloaders(batch_size: int) -> Tuple[Any, DataLoader]:
         
         return dtl
     
-    dataloader_train = _create_dataloader(robotics_dataset)
+    # Use standard DataLoader with workers first (if that helps), but user requested the class.
+    # The AsyncDataLoader is useful if there's still bottleneck in main thread loop.
+    
+    raw_dataloader_train = _create_dataloader(robotics_dataset)
+    dataloader_train = AsyncDataLoader(raw_dataloader_train)
+    
     dataloader_evals = {dts_name: _create_dataloader(dts) for dts_name, dts in val_datasets_dict.items()}
     
     example_actions = robotics_dataset[0]['actions']

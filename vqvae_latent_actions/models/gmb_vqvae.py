@@ -20,6 +20,9 @@ class GMBVQVAEOutput:
     latents: Tensor
     quantized_latents: Tensor
     indices: Tensor
+    token_usage_percent: Tensor  # Percentage of unique tokens used in batch
+    token_entropy: Tensor  # Entropy of token distribution in batch
+    token_counts: Tensor  # Histogram of token counts (vocab_size,)
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -115,6 +118,37 @@ class GMBQuantizer(nn.Module):
         reconstructed = reconstructed_flat.view(batch_size, seq_len, self.latent_dim)
 
         return reconstructed, indices
+    
+    def analyze_token_usage(self, indices: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """
+        Analyze token usage statistics for a batch of indices.
+        
+        Args:
+            indices: Tensor of shape (B, quant_layers) containing discrete codes
+        
+        Returns:
+            usage_percent: Percentage of unique tokens used in this batch (scalar)
+            entropy: Entropy of token distribution in this batch (scalar)
+            token_counts: Histogram of token counts, shape (vocab_size,)
+        """
+        with torch.no_grad():
+            # Flatten indices to count across all positions and layers
+            flat_indices = indices.reshape(-1)
+            
+            # Compute token counts histogram
+            token_counts = torch.bincount(flat_indices, minlength=self.vocab_size).float()
+            
+            # Compute percentage of unique tokens used
+            unique_tokens = (token_counts > 0).sum()
+            usage_percent = 100.0 * unique_tokens.float() / self.vocab_size
+            
+            # Compute entropy
+            probs = token_counts / (token_counts.sum() + 1e-10)
+            # Filter out zero probabilities
+            non_zero_probs = probs[probs > 0]
+            entropy = -(non_zero_probs * torch.log(non_zero_probs + 1e-10)).sum()
+            
+            return usage_percent, entropy, token_counts
 
 
 
@@ -130,9 +164,15 @@ class TransformerBackbone(nn.Module):
         num_heads: int,
         dropout: float,
         max_seq_len: int,
+        use_projection: bool
     ) -> None:
         super().__init__()
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        assert input_dim == hidden_dim or use_projection, "input_dim must be equal to hidden_dim or use_projection must be True"
+        
+        self.input_proj = nn.Linear(input_dim, hidden_dim) if use_projection else nn.Identity()
+        self.output_proj = nn.Linear(hidden_dim, output_dim) if use_projection else nn.Identity()
+        self.layer_norm = nn.LayerNorm(hidden_dim) if use_projection else nn.Identity()
+        
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
@@ -142,9 +182,8 @@ class TransformerBackbone(nn.Module):
             batch_first=True,
             norm_first=True,
         )
+        
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-        self.output_proj = nn.Linear(hidden_dim, output_dim)
         self.positional_encoding = SinusoidalPositionalEncoding(hidden_dim, max_len=max_seq_len)
 
     def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
@@ -173,6 +212,8 @@ class GMBVQVAE(nn.Module):
         commitment_cost: float = 0.25,
         dropout: float = 0.1,
         max_seq_len: int = 2048,
+        use_projection_encoder: bool = True,
+        use_projection_decoder: bool = True,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
@@ -190,6 +231,7 @@ class GMBVQVAE(nn.Module):
             num_heads=num_heads,
             dropout=dropout,
             max_seq_len=max_seq_len,
+            use_projection=use_projection_encoder,
         )
         self.decoder = TransformerBackbone(
             input_dim=latent_dim,
@@ -199,6 +241,7 @@ class GMBVQVAE(nn.Module):
             num_heads=num_heads,
             dropout=dropout,
             max_seq_len=max_seq_len,
+            use_projection=use_projection_decoder,
         )
         self.quantizer = GMBQuantizer(
             gamma=gmb_gamma, 
@@ -254,6 +297,9 @@ class GMBVQVAE(nn.Module):
         
         loss = recon_loss + commitment_loss
         
+        # Analyze token usage statistics
+        token_usage_percent, token_entropy, token_counts = self.quantizer.analyze_token_usage(indices)
+        
         return GMBVQVAEOutput(
             loss=loss,
             recon_loss=recon_loss,
@@ -261,6 +307,9 @@ class GMBVQVAE(nn.Module):
             latents=latents,
             quantized_latents=quantized,
             indices=indices,
+            token_usage_percent=token_usage_percent,
+            token_entropy=token_entropy,
+            token_counts=token_counts,
         )
 
     def compute_loss(self, batch: Dict[str, Tensor]) -> GMBVQVAEOutput:

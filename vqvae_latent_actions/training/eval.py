@@ -1,7 +1,7 @@
 """Evaluation utilities."""
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 from accelerate import Accelerator
@@ -39,12 +39,13 @@ def _evaluate_single_dataloader(
     model: torch.nn.Module,
     dataloader: DataLoader,
     accelerator: Accelerator,
-    max_eval_batches: int | None = None
-) -> Dict[str, float]:
+    max_eval_batches: int | None = None,
+) -> Tuple[Dict[str, float], torch.Tensor | None]:
     """Evaluate on a single dataloader - runs on all processes in parallel."""
     # Accumulators for local process
     totals: Dict[str, float] = {}
     total_samples = 0.0
+    accumulated_token_counts = None
 
     for index, batch in enumerate(dataloader):
         if max_eval_batches is not None and index >= max_eval_batches:
@@ -66,8 +67,15 @@ def _evaluate_single_dataloader(
 
         for name in field_names:
             value = getattr(outputs, name)
-            # Only accumulate scalar tensors
-            if isinstance(value, torch.Tensor) and value.numel() == 1:
+            
+            # Special handling for token_counts - accumulate histogram
+            if name == 'token_counts' and isinstance(value, torch.Tensor):
+                if accumulated_token_counts is None:
+                    accumulated_token_counts = value.detach().clone()
+                else:
+                    accumulated_token_counts += value.detach()
+            # Only accumulate scalar tensors for regular metrics
+            elif isinstance(value, torch.Tensor) and value.numel() == 1:
                 val = value.detach().item()
                 if name not in totals:
                     totals[name] = 0.0
@@ -75,7 +83,7 @@ def _evaluate_single_dataloader(
 
     # Return empty if no samples or no metrics
     if total_samples == 0 or not totals:
-        return {}
+        return {}, None
 
     # Convert to tensors for gathering
     # Sort keys to ensure consistent order across processes
@@ -105,8 +113,16 @@ def _evaluate_single_dataloader(
     else:
         for name in metric_names:
             results[name] = 0.0
+    
+    # Gather and sum token_counts across all processes
+    gathered_token_counts = None
+    if accumulated_token_counts is not None:
+        gathered_token_counts = accelerator.gather(accumulated_token_counts)
+        # Sum across all processes
+        if gathered_token_counts.dim() > 1:
+            gathered_token_counts = gathered_token_counts.sum(dim=0)
             
-    return results
+    return results, gathered_token_counts
 
 
 def evaluate(
@@ -114,17 +130,24 @@ def evaluate(
     dataloaders: Dict[str, DataLoader],
     accelerator: Accelerator,
     max_eval_batches: int | None = None,
-) -> Tuple[Dict[str, Dict[str, float]], Dict[str, float], list]:
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, float], list, Dict[str, torch.Tensor]]:
     """
     Evaluate model on validation dataloaders.
     
     Runs on ALL processes in parallel for speed, but returns results only on main process.
     Other processes get empty results.
+    
+    Returns:
+        per_dataset: Dict mapping dataset name to metrics dict
+        aggregated: Dict of aggregated metrics across all datasets
+        metric_names: List of metric names
+        per_dataset_token_counts: Dict mapping dataset name to accumulated token count histograms
     """
     per_dataset: Dict[str, Dict[str, float]] = {}
+    per_dataset_token_counts: Dict[str, torch.Tensor] = {}
     
     if not dataloaders:
-        return per_dataset, {}, []
+        return per_dataset, {}, [], per_dataset_token_counts
 
     model.eval()
     with torch.no_grad():
@@ -132,9 +155,12 @@ def evaluate(
         for name, dataloader in dataloaders.items():
             if dataloader is None:
                 continue
-            per_dataset[name] = _evaluate_single_dataloader(
+            metrics, token_counts = _evaluate_single_dataloader(
                 model, dataloader, accelerator, max_eval_batches=max_eval_batches
             )
+            per_dataset[name] = metrics
+            if token_counts is not None:
+                per_dataset_token_counts[name] = token_counts
     model.train()
 
     # Compute aggregated metrics
@@ -148,7 +174,7 @@ def evaluate(
     
     # Return results on all processes (they're the same due to gather)
     # but only main process will log them
-    return per_dataset, aggregated, metric_names
+    return per_dataset, aggregated, metric_names, per_dataset_token_counts
 
 
 __all__ = ["evaluate"]

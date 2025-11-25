@@ -7,10 +7,12 @@ num_heads: 4
 num_encoder_layers: 6
 num_decoder_layers: 6
 codebook_size: 2048
-num_codebooks: 4
+num_codebooks: 32
 entropy_loss_weight: 0.1
 diversity_gamma: 1.0
-commitment_cost: 0.25
+commitment_cost: 0.15
 dropout: 0.1
 max_seq_len: 100
+use_projection_encoder: true
+use_projection_decoder: true
 

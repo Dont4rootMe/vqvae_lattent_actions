@@ -24,6 +24,9 @@ class LFQVQVAEOutput:
     latents: Tensor
     quantized_latents: Tensor
     indices: Tensor
+    token_usage_percent: Tensor  # Percentage of unique tokens used in batch
+    token_entropy: Tensor  # Entropy of token distribution in batch
+    token_counts: Tensor  # Histogram of token counts (codebook_size,)
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -116,6 +119,37 @@ class LFQQuantizer(nn.Module):
                 non_zero = probs[probs > 0]
                 entropy = -(non_zero * torch.log(non_zero)).sum()
                 return torch.exp(entropy)
+    
+    def analyze_token_usage(self, indices: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """
+        Analyze token usage statistics for a batch of indices.
+        
+        Args:
+            indices: Tensor of shape (B, T, num_codebooks) containing discrete codes
+        
+        Returns:
+            usage_percent: Percentage of unique tokens used in this batch (scalar)
+            entropy: Entropy of token distribution in this batch (scalar)
+            token_counts: Histogram of token counts, shape (codebook_size,)
+        """
+        with torch.no_grad():
+            # Flatten indices to count across all positions and codebooks
+            flat_indices = indices.reshape(-1)
+            
+            # Compute token counts histogram
+            token_counts = torch.bincount(flat_indices, minlength=self.codebook_size).float()
+            
+            # Compute percentage of unique tokens used
+            unique_tokens = (token_counts > 0).sum()
+            usage_percent = 100.0 * unique_tokens.float() / self.codebook_size
+            
+            # Compute entropy
+            probs = token_counts / (token_counts.sum() + 1e-10)
+            # Filter out zero probabilities
+            non_zero_probs = probs[probs > 0]
+            entropy = -(non_zero_probs * torch.log(non_zero_probs + 1e-10)).sum()
+            
+            return usage_percent, entropy, token_counts
 
 
 class TransformerBackbone(nn.Module):
@@ -250,6 +284,9 @@ class LFQVQVAE(nn.Module):
         loss = recon_loss + commitment_loss + entropy_aux_loss
         perplexity = self.quantizer.perplexity(indices)
         
+        # Analyze token usage statistics
+        token_usage_percent, token_entropy, token_counts = self.quantizer.analyze_token_usage(indices)
+        
         return LFQVQVAEOutput(
             loss=loss,
             recon_loss=recon_loss,
@@ -260,6 +297,9 @@ class LFQVQVAE(nn.Module):
             latents=latents,
             quantized_latents=quantized,
             indices=indices,
+            token_usage_percent=token_usage_percent,
+            token_entropy=token_entropy,
+            token_counts=token_counts,
         )
 
     def compute_loss(self, batch: Dict[str, Tensor]) -> LFQVQVAEOutput:

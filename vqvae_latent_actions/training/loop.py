@@ -45,12 +45,41 @@ def _ensure_actions_dtype(batch: Dict, model: torch.nn.Module) -> Dict:
     return batch
 
 
+def _compute_gradient_stats(model: torch.nn.Module) -> Dict[str, float]:
+    """Compute gradient statistics for logging."""
+    total_norm = 0.0
+    num_params = 0
+    max_grad = 0.0
+    min_grad = float('inf')
+    grad_sum = 0.0
+    
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2).item()
+            total_norm += param_norm ** 2
+            num_params += p.grad.numel()
+            grad_sum += p.grad.data.abs().sum().item()
+            max_grad = max(max_grad, p.grad.data.abs().max().item())
+            min_grad = min(min_grad, p.grad.data.abs().min().item())
+    
+    total_norm = total_norm ** 0.5
+    mean_grad = grad_sum / num_params if num_params > 0 else 0.0
+    
+    return {
+        'grad_norm': total_norm,
+        'grad_mean': mean_grad,
+        'grad_max': max_grad,
+        'grad_min': min_grad if min_grad != float('inf') else 0.0,
+    }
+
+
 def _log_train_metrics(
     accelerator: Accelerator,
     logger: MetricLogger,
     outputs,
     lr: float,
     step: int,
+    grad_stats: Optional[Dict[str, float]] = None,
 ) -> None:
     
     metrics = {'lr': torch.tensor(lr, device=accelerator.device)}
@@ -66,8 +95,13 @@ def _log_train_metrics(
         if isinstance(value, torch.Tensor):
             value = value.detach()
             # Only log scalars or 1D tensors
-            if value.dim() <= 1:
+            if value.dim() < 1:
                 metrics[name] = value
+    
+    # Add gradient statistics if provided
+    if grad_stats is not None:
+        for name, value in grad_stats.items():
+            metrics[name] = torch.tensor(value, device=accelerator.device)
 
     reduced = {}
     for name, value in sorted(metrics.items(), key=lambda x: x[0]):
@@ -148,6 +182,11 @@ def run_train_loop(
             outputs = model(batch["actions"])
             accelerator.backward(outputs.loss)
             
+            # Compute gradient statistics before clipping for accurate measurements
+            grad_stats = None
+            if accelerator.sync_gradients and global_step % log_interval == 0:
+                grad_stats = _compute_gradient_stats(model)
+            
             if accelerator.sync_gradients and grad_clip is not None:
                 accelerator.clip_grad_norm_(model.parameters(), grad_clip)
                 
@@ -161,11 +200,13 @@ def run_train_loop(
         
         if global_step % log_interval == 0 and accelerator.sync_gradients:
             current_lr = optimizer.param_groups[0]["lr"]
-            _log_train_metrics(accelerator, metric_logger, outputs, current_lr, global_step)
+            _log_train_metrics(accelerator, metric_logger, outputs, current_lr, global_step, grad_stats)
 
         if val_interval > 0 and global_step % val_interval == 0:
             # All processes participate in evaluation for speed
-            per_dataset_metrics, aggregated_metrics, metric_names = evaluate(model, dataloader_val, accelerator, max_eval_batches)
+            per_dataset_metrics, aggregated_metrics, metric_names, per_dataset_token_counts = evaluate(
+                model, dataloader_val, accelerator, max_eval_batches
+            )
             
             # Only main process logs and saves
             if accelerator.is_main_process:
@@ -179,6 +220,26 @@ def run_train_loop(
                 # plot sepparately for each dataset
                 for dataset_name, metrics in per_dataset_metrics.items():
                     metric_logger.log(f"val-dataset/{dataset_name}", metrics, global_step)
+                
+                # Log token utilization histograms from accumulated token_counts
+                if per_dataset_token_counts:
+                    # Histogram for all validation datasets combined
+                    all_token_counts = sum(per_dataset_token_counts.values())
+                    metric_logger.log_histogram(
+                        "token_histogram/all_datasets",
+                        "histogram",
+                        all_token_counts,
+                        global_step
+                    )
+                    
+                    # Histogram for each dataset separately
+                    for dataset_name, token_counts in per_dataset_token_counts.items():
+                        metric_logger.log_histogram(
+                            f"token_histogram/{dataset_name}",
+                            "histogram",
+                            token_counts,
+                            global_step
+                        )
                 
                 # if aggregated_metrics:
                 #     metric_logger.log("val-aggregation", aggregated_metrics, global_step)

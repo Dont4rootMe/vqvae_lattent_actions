@@ -44,6 +44,15 @@ class ClearMLLogger:
 
     def log_figure(self, title: str, series: str, figure, step: int) -> None:
         self.logger.report_matplotlib_figure(title=title, series=series, figure=figure, iteration=step)
+    
+    def log_histogram(self, title: str, series: str, values, step: int, bins: int = 50) -> None:
+        """Log a histogram of values."""
+        import numpy as np
+        if hasattr(values, 'cpu'):  # torch tensor
+            values = values.cpu().numpy()
+        elif not isinstance(values, np.ndarray):
+            values = np.array(values)
+        self.logger.report_histogram(title=title, series=series, values=values.flatten(), iteration=step, xaxis="Token ID", yaxis="Count")
 
 
 class MetricLogger:
@@ -63,6 +72,10 @@ class MetricLogger:
     def log_figure(self, title: str, series: str, figure, step: int) -> None:
         if self.accelerator.is_main_process and self.clearml_logger is not None:
             self.clearml_logger.log_figure(title, series, figure, step)
+    
+    def log_histogram(self, title: str, series: str, values, step: int, bins: int = 50) -> None:
+        if self.accelerator.is_main_process and self.clearml_logger is not None:
+            self.clearml_logger.log_histogram(title, series, values, step, bins)
 
 
 def maybe_create_clearml_logger(cfg: Dict, accelerator: Accelerator) -> Optional[ClearMLLogger]:
