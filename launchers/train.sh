@@ -13,6 +13,8 @@ OVERRIDES=(run_name="$RUN_NAME" model="$MODEL" train.steps="$STEPS" train.batch_
 [ -n "$EXTRA" ] && OVERRIDES+=(${EXTRA//;/ })
 echo "[launch] ${OVERRIDES[*]}"
 nvidia-smi --query-gpu=index,name,memory.used --format=csv,noheader || true
-accelerate launch --num_machines 1 --num_processes "$NPROC" --multi_gpu --mixed_precision bf16 --dynamo_backend no \
+LAUNCH=(--num_machines 1 --num_processes "$NPROC" --mixed_precision bf16 --dynamo_backend no)
+[ "$NPROC" -gt 1 ] && LAUNCH+=(--multi_gpu)     # accelerate refuses --multi_gpu with a single process
+accelerate launch "${LAUNCH[@]}" \
   train.py "${OVERRIDES[@]}"
 echo "[launch] done $(date -Is)"
