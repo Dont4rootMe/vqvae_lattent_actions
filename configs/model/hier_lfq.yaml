@@ -1,5 +1,6 @@
 defaults:
-  - hier_fsq
+  - hier_base
+  - _self_
 
 quantizer:
   type: lfq

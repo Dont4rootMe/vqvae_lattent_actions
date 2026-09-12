@@ -122,3 +122,10 @@ def test_fsq_saturation_reports_how_much_of_the_grid_is_out_of_reach():
     q = FSQ(levels=[8, 8, 8, 4])
     assert q.saturation(torch.zeros(4, 4)) == 0.0
     assert q.saturation(torch.full((4, 4), 50.0)) == 1.0
+
+
+def test_build_quantizer_rejects_a_key_meant_for_another_quantizer():
+    """Model configs inherit from one another, so an FSQ-only key can ride along into a learned codebook and
+    kill the run at construction. The error must name the key."""
+    with pytest.raises(ValueError, match="levels"):
+        build_quantizer({"type": "vq", "vocab_size": 16, "code_dim": 4, "levels": [4, 4]})

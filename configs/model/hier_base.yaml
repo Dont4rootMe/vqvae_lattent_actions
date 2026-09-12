@@ -1,0 +1,18 @@
+# Everything except the quantizer. Each concrete config below defines its own quantizer block in full:
+# inheriting one and overriding it merges the two, which silently carries FSQ's `levels` into a learned
+# codebook and makes the run die at construction.
+horizon: 10
+max_horizon: 64
+num_tokens: 10             # N tokens per chunk
+dim: 256
+heads: 8
+free_queries: 4            # per-step queries on top of one query per semantic group
+enc_step_layers: 2
+enc_time_layers: 4
+enc_latent_layers: 4
+dec_latent_layers: 2
+dec_layers: 4
+ff_mult: 4
+dropout: 0.0
+value_embedding: mlp
+group_weights: null

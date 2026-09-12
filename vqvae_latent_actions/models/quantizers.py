@@ -5,6 +5,7 @@ arbitrary vocabulary sizes, LFQ and Gumbel-softmax are kept from the earlier exp
 """
 from __future__ import annotations
 
+import inspect
 import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -275,18 +276,21 @@ class GumbelQuantizer(Quantizer):
         return self.embedding(indices)
 
 
+KINDS: Mapping[str, type] = {"fsq": FSQ, "vq": VQEMA, "vqema": VQEMA, "vq_ema": VQEMA,
+                             "lfq": LFQWrapper, "gumbel": GumbelQuantizer}
+
+
 def build_quantizer(config: Mapping[str, Any]) -> Quantizer:
     config = dict(config)
     kind = str(config.pop("type", "fsq")).lower()
-    if kind == "fsq":
-        return FSQ(**config)
-    if kind in ("vq", "vqema", "vq_ema"):
-        return VQEMA(**config)
-    if kind == "lfq":
-        return LFQWrapper(**config)
-    if kind == "gumbel":
-        return GumbelQuantizer(**config)
-    raise ValueError(f"unknown quantizer type {kind!r}")
+    if kind not in KINDS:
+        raise ValueError(f"unknown quantizer type {kind!r}, expected one of {sorted(KINDS)}")
+    cls = KINDS[kind]
+    accepted = set(inspect.signature(cls.__init__).parameters) - {"self"}
+    unexpected = sorted(set(config) - accepted)
+    if unexpected:   # config groups merge, so a key from another quantizer rides along unnoticed
+        raise ValueError(f"quantizer {kind!r} does not accept {unexpected}; it accepts {sorted(accepted)}")
+    return cls(**config)
 
 
 def code_usage(indices: Tensor, vocab_size: int) -> dict[str, float]:

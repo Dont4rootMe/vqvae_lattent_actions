@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
@@ -33,3 +35,18 @@ def test_overrides_reach_the_train_config(tmp_path, tiny_manifest, tiny_eval_set
     assert train_cfg.model["num_tokens"] == 6 and train_cfg.model["quantizer"]["type"] == "vq"
     assert train_cfg.comet["mode"] == "disabled" and train_cfg.cache_dir is None
     assert json.loads(json.dumps(train_cfg.model))                       # plain containers, no omegaconf leftovers
+
+
+@pytest.mark.parametrize("name", ["hier_fsq", "hier_vq", "hier_lfq", "hier_gumbel"])
+def test_every_shipped_model_config_builds_its_quantizer(name):
+    """Every arm in configs/model must be launchable. The learned-codebook arms were unrunnable for a while:
+    they inherited FSQ's `levels`, which no other quantizer accepts."""
+    if name == "hier_lfq":
+        pytest.importorskip("vector_quantize_pytorch")
+    from vqvae_latent_actions.models.quantizers import build_quantizer
+    with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base=None):
+        cfg = compose(config_name="config", overrides=["run_name=unit", f"model={name}"])
+    payload = OmegaConf.to_container(cfg, resolve=True)
+    quantizer = build_quantizer(payload["model"]["quantizer"])
+    assert quantizer.vocab_size == 2048          # the spec caps the alphabet at FAST's 2048
+    assert quantizer.code_dim > 0 and quantizer.out_dim > 0
