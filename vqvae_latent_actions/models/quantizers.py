@@ -111,17 +111,19 @@ class VQEMA(Quantizer):
 
     def __init__(self, vocab_size: int, code_dim: int, commitment: float = 0.25, decay: float = 0.99,
                  eps: float = 1e-5, dead_threshold: float = 1.0, kmeans_init: bool = True,
-                 kmeans_iters: int = 10, restart_ratio: float = 0.1) -> None:
+                 kmeans_iters: int = 10, restart_ratio: float = 0.1, seed_samples_per_code: int = 4) -> None:
         super().__init__()
         self.vocab_size, self.code_dim, self.out_dim = int(vocab_size), int(code_dim), int(code_dim)
         self.commitment, self.decay, self.eps, self.dead_threshold = float(commitment), float(decay), float(eps), float(dead_threshold)
         self.kmeans_init, self.kmeans_iters = bool(kmeans_init), int(kmeans_iters)
         self.restart_ratio = float(restart_ratio)   # codes used far less than average are restarted
+        self.seed_samples_per_code = int(seed_samples_per_code)
         codebook = torch.randn(self.vocab_size, self.code_dim) * 0.1
         self.register_buffer("codebook", codebook)
         self.register_buffer("cluster_size", torch.ones(self.vocab_size))
         self.register_buffer("embed_sum", codebook.clone())
         self.register_buffer("initialized", torch.zeros((), dtype=torch.bool))
+        self._seed_buffer: list[Tensor] = []      # latents collected until there are enough to seed the codebook
 
     @staticmethod
     def _sync(tensor: Tensor, average: bool = False) -> Tensor:
@@ -169,6 +171,25 @@ class VQEMA(Quantizer):
         return codes
 
     @torch.no_grad()
+    def _collect(self, flat: Tensor) -> Tensor | None:
+        """Hold latents back until one step's worth is enough to seed every code.
+
+        A single batch can carry fewer vectors than the codebook has entries (256 chunks x 5 tokens against 2048
+        codes), and seeding from it draws the same vector many times. The duplicates then survive, because a code
+        that shares its position with others still collects enough usage to never look dead. Even an exactly
+        sufficient sample is too thin: k-means++ needs several points per code to place one.
+        """
+        if not self.kmeans_init:
+            return flat
+        self._seed_buffer.append(flat)
+        total = sum(part.shape[0] for part in self._seed_buffer)
+        if total < self.seed_samples_per_code * self.vocab_size:
+            return None
+        collected = torch.cat(self._seed_buffer)
+        self._seed_buffer = []
+        return collected
+
+    @torch.no_grad()
     def _initialize(self, flat: Tensor) -> None:
         if self.kmeans_init and flat.shape[0] >= self.vocab_size:
             codes = self._lloyd(flat, self._seed_plus_plus(flat))
@@ -185,7 +206,9 @@ class VQEMA(Quantizer):
         z = z.float()
         flat = z.reshape(-1, self.code_dim)
         if self.training and not bool(self.initialized):
-            self._initialize(flat.detach())
+            collected = self._collect(flat.detach())
+            if collected is not None:
+                self._initialize(collected)
         distances = flat.pow(2).sum(1, keepdim=True) - 2 * flat @ self.codebook.t() + self.codebook.pow(2).sum(1)
         indices = distances.argmin(dim=1)
         quantized = self.codebook[indices]
@@ -201,16 +224,19 @@ class VQEMA(Quantizer):
                 self.codebook.copy_(self.embed_sum / smoothed.unsqueeze(1))
                 floor = torch.clamp(self.cluster_size.mean() * self.restart_ratio, min=self.dead_threshold)
                 dead = self.cluster_size < floor
-                if bool(dead.any()):
-                    count = int(dead.sum())
+                # One sample may revive one code. Repeating samples to fill the quota writes the same vector into
+                # many codes, which is the collapse the restart exists to prevent; with a batch smaller than the
+                # codebook that happens on every step.
+                count = min(int(dead.sum()), int(flat.shape[0]))
+                if count:
+                    scores = (-self.cluster_size).masked_fill(~dead, float("-inf"))
+                    victims = scores.topk(count).indices                                # the emptiest codes
                     far = torch.cdist(flat.detach(), self.codebook).min(dim=1).values   # worst-covered samples
-                    pick = far.topk(min(count, far.shape[0])).indices
-                    if pick.shape[0] < count:
-                        pick = pick.repeat(count // pick.shape[0] + 1)[:count]
+                    pick = far.topk(count).indices
                     replacement = self._broadcast(flat.detach()[pick].clone().contiguous())
-                    self.codebook[dead] = replacement
-                    self.embed_sum[dead] = replacement
-                    self.cluster_size[dead] = 1.0
+                    self.codebook[victims] = replacement
+                    self.embed_sum[victims] = replacement
+                    self.cluster_size[victims] = 1.0
         aux = self.commitment * F.mse_loss(flat, quantized.detach())
         codes = flat + (quantized - flat).detach()
         return QuantizerOutput(codes=codes.view_as(z), indices=indices.view(z.shape[:-1]), aux_loss=aux)

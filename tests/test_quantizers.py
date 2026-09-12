@@ -129,3 +129,46 @@ def test_build_quantizer_rejects_a_key_meant_for_another_quantizer():
     kill the run at construction. The error must name the key."""
     with pytest.raises(ValueError, match="levels"):
         build_quantizer({"type": "vq", "vocab_size": 16, "code_dim": 4, "levels": [4, 4]})
+
+
+def test_vqema_waits_for_enough_samples_before_seeding_the_codebook():
+    """A batch smaller than the codebook cannot seed it: drawing 2048 codes from 1280 vectors repeats them, and
+    duplicated codes keep enough usage to never be restarted. Seen for real at 5 tokens x batch 256."""
+    torch.manual_seed(0)
+    centers = torch.randn(64, 2) * 6
+
+    def batch(n=8):                                   # 8 vectors per step against 64 codes
+        idx = torch.randint(0, 64, (n,))
+        return (centers[idx] + torch.randn(n, 2) * 0.02).view(1, n, 2)
+
+    def seeded(**kwargs):                             # restarts off, so this measures seeding alone
+        torch.manual_seed(0)
+        q = VQEMA(vocab_size=64, code_dim=2, decay=0.8, restart_ratio=0.0, dead_threshold=0.0, **kwargs)
+        q.train()
+        steps = 0
+        while not bool(q.initialized) and steps < 200:
+            q(batch())
+            steps += 1
+        return q, steps
+
+    def covered(q):                                    # clusters that ended up with a code of their own
+        return int((torch.cdist(centers, q.codebook).min(dim=1).values < 1.0).sum())
+
+    patient, steps = seeded()
+    assert steps > 1                                   # one small batch is not enough to seed
+    assert covered(patient) > 55
+
+    greedy, greedy_steps = seeded(seed_samples_per_code=1)
+    assert greedy_steps < steps                        # seeds as soon as one codebook's worth has arrived
+    assert covered(greedy) < covered(patient)          # and pays for it: a thin sample misses whole clusters
+
+
+def test_vqema_restart_never_writes_one_sample_into_many_codes():
+    """With a batch smaller than the codebook almost every code looks dead. Filling that quota by repeating the
+    few available samples collapses the codebook instead of reviving it."""
+    torch.manual_seed(0)
+    q = VQEMA(vocab_size=64, code_dim=2, kmeans_init=False, decay=0.5, restart_ratio=1.0)
+    q.train()
+    for _ in range(5):
+        q(torch.randn(1, 8, 2) * 5)                    # 8 samples, so at most 8 codes may be revived per step
+    assert len({tuple(row.tolist()) for row in q.codebook}) > 40
