@@ -16,3 +16,5 @@
 
 | Имя | Где | Что | Каталог | Статус |
 |---|---|---|---|---|
+| `lerobot-research-r09-smoke` | IB tmux, GPU 0,1 | pytest в боевом окружении (34 passed, 1 skipped) + 200 шагов обучения, Comet online | `$BASE/runs/hier_smoke` | exit=0 12:06 MSK; 15.8M параметров, 10 токенов × 2048 кодов = 110 бит/чанк; использование кодбука 1–2 кода (warmup 2000 не пройден за 200 шагов) |
+| `lerobot-research-r09-usage` | IB tmux, GPU 7 | диагностика: 1500 шагов, warmup 50, batch 128, eval каждые 250 — раскрывается ли кодбук | `$BASE/runs/hier_codeusage` | запущен 12:08 MSK |

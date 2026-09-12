@@ -2586,7 +2586,8 @@ ENVS="RUN_NAME=$RUN_NAME MODEL=${MODEL:-hier_fsq} NPROC=8 STEPS=${STEPS:-300000}
 [ -n "$LEVELS" ] && ENVS="$ENVS LEVELS=$LEVELS"
 CMD="cd $DIR && env $ENVS bash --noprofile --norc $DIR/train.sh"
 echo "[submit] lerobot-research-${TAG}-hier: $CMD"
-bot submit -t 8gpu -H 48 -n "lerobot-research-${TAG}-hier" -c "$CMD" --json | tee "$DIR/submit.json"
+# the team 8gpu quota is often fully used, so wait for a team slot instead of being refused outright
+bot submit -t 8gpu -H 48 -n "lerobot-research-${TAG}-hier" -c "$CMD" ${QUEUE_FLAGS:---team-wait} --json | tee "$DIR/submit.json"
 ```
 
 ```bash
