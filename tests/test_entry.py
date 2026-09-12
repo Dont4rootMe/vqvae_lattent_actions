@@ -14,7 +14,8 @@ def test_config_tree_composes_and_matches_the_budget():
         cfg = compose(config_name="config", overrides=["run_name=unit"])
     payload = OmegaConf.to_container(cfg, resolve=True)
     assert payload["model"]["num_tokens"] == 10
-    assert payload["model"]["quantizer"]["levels"] == [8, 8, 8, 4]      # 8*8*8*4 = 2048 codes, 11 bits
+    quantizer = payload["model"]["quantizer"]                            # the default arm is the learned codebook
+    assert quantizer["type"] == "vq" and quantizer["vocab_size"] == 2048 and quantizer["code_dim"] == 4
     assert payload["train"]["steps"] == 300000 and payload["train"]["mixed_precision"] == "bf16"
     assert payload["comet"]["project"] and payload["comet"]["workspace"] == "dont4rootme"
     assert "manifest" in payload["data"] and "eval_set" in payload["data"]

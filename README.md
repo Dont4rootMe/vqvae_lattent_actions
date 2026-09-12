@@ -15,17 +15,22 @@ robot state.
    queries see everything. A within-step self-attention block afterwards lets the queries of a timestep mix.
 3. **Dynamics.** Self-attention over all `T*K` tokens with a time code: the tokenizer models the trajectory, not
    isolated points.
-4. **Latents.** `N` learned queries compress the sequence through Perceiver blocks; the quantizer (FSQ by default,
-   VQ-EMA / LFQ / Gumbel available) turns them into `N` tokens.
+4. **Latents.** `N` learned queries compress the sequence through Perceiver blocks; the quantizer (VQ-EMA by
+   default, FSQ / LFQ / Gumbel available) turns them into `N` tokens.
 5. **Decoder.** Mirrors the encoder, is conditioned on the same mask, and emits exactly zeros where the mask says
    padding; per-dimension heads read their group token plus a pooled summary of the free tokens.
 
 Loss: masked MSE over real entries only (optional per-group weights) plus the quantizer's auxiliary term.
 
-**The quantizer needs a warmup.** Switching the grid on at step 0 collapses the codebook to a single code and the
-encoder to a constant. `train.quantizer_warmup_steps` (10,000 by default) trains the plain autoencoder first; after
-that the codebook stays nearly fully used. Evaluations run during the warmup score the continuous path and are
-marked `eval/quantized: 0`.
+**The quantizer needs a warmup.** Quantizing from step 0 collapses the code to a single value and the encoder to
+a constant. `train.quantizer_warmup_steps` (10,000 by default) trains the plain autoencoder first. The latents still
+pass through the quantizer's `bound`, so both phases share one value range; without that the encoder drifts out of
+the range a fixed grid can resolve. Evaluations during the warmup score the continuous path and are marked
+`eval/quantized: 0`.
+
+**Watch the per-position numbers, not the pooled ones.** `eval/perplexity` counts all token positions together and
+happily reports 2031 of 2048 codes while three of ten positions carry one bit each. `eval/min_position_perplexity`
+and `eval/effective_bits` are the honest measures of what the bottleneck carries.
 
 ## Data
 
@@ -36,9 +41,9 @@ Chunks come from the `action_chunks` package (mixture R0_v2.1, 95 embodiments, m
 ## Running
 
 ```bash
-python train.py run_name=hier-fsq-n10-v2048                    # defaults: N=10, V=2048 (FSQ [8,8,8,4]), 300k steps
-python train.py model=hier_vq model.num_tokens=16 train.steps=100000
-accelerate launch --multi_gpu --num_processes 8 train.py run_name=hier-fsq-n10-v2048
+python train.py run_name=hier-vq-n10-v2048                     # defaults: N=10, V=2048 (VQ-EMA), 300k steps
+python train.py model=hier_fsq model.num_tokens=16 train.steps=100000
+accelerate launch --multi_gpu --num_processes 8 train.py run_name=hier-vq-n10-v2048
 ```
 
 On the cluster use `launchers/`: `smoke.sh` (IB node, tmux, 200 steps on 2 GPUs), `submit.sh` (bot `8gpu` queue),

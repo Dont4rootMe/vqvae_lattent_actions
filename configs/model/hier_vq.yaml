@@ -5,6 +5,8 @@ defaults:
 quantizer:
   type: vq
   vocab_size: 2048
-  code_dim: 64
+  # A narrow code beats a wide one here: at an identical 6000-step budget width 4 gave RMSE 0.11598 and used
+  # 95 of 110 bits, width 64 gave 0.14094 and 84 bits (docs/runs.md, 2026-09-12).
+  code_dim: 4
   commitment: 0.25
   decay: 0.99

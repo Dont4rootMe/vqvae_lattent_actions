@@ -1,9 +1,9 @@
 defaults:
-  - model: hier_fsq
+  - model: hier_vq
   - data: r0_v2_1
   - _self_
 
-run_name: hier-fsq-n10-v2048
+run_name: hier-vq-n10-v2048
 
 train:
   out_dir: ${oc.env:VQLA_OUT,outputs}/${run_name}
