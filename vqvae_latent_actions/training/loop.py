@@ -118,16 +118,21 @@ def train(cfg: TrainConfig) -> dict:
 
     def run_eval(current: int) -> dict:
         target = accelerator.unwrap_model(model)
-        summary = evaluate_tokenizer(target, eval_set, batch_size=cfg.eval_batch_size, device=device)
+        # the warmup trains a plain autoencoder, so until it is over the grid is not what the model reconstructs from
+        quantized = current > cfg.quantizer_warmup_steps
+        summary = evaluate_tokenizer(target, eval_set, batch_size=cfg.eval_batch_size, device=device,
+                                     quantize=quantized)
         summary["padding_invariance_mismatch"] = padding_invariance_mismatch(target, eval_set, device=device)
         write_report(out / f"eval_step{current:07d}.json", f"{cfg.run_name}@{current}", summary,
                      {"step": current, **model_report_extra(target)})
         total, usage = summary["total"], summary["usage"]
         logger.log_metrics({"eval/rmse": total["rmse"], "eval/l1": total["l1"], "eval/max_abs": total["max_abs_mean"],
                             "eval/codes_used": usage["codes_used"], "eval/perplexity": usage["perplexity"],
+                            "eval/quantized": int(quantized),
                             "eval/padding_mismatch": summary["padding_invariance_mismatch"]}, step=current, split="eval")
-        accelerator.print(f"eval step {current}: rmse={total['rmse']:.5f} l1={total['l1']:.5f} "
-                          f"codes={usage['codes_used']}/{usage['vocab_size']} perplexity={usage['perplexity']:.0f}")
+        codes = (f"codes={usage['codes_used']}/{usage['vocab_size']} perplexity={usage['perplexity']:.0f}"
+                 if quantized else "continuous (quantizer warmup)")
+        accelerator.print(f"eval step {current}: rmse={total['rmse']:.5f} l1={total['l1']:.5f} {codes}")
         return summary
 
     def save_checkpoint() -> None:

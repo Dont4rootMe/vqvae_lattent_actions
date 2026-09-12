@@ -22,6 +22,11 @@ robot state.
 
 Loss: masked MSE over real entries only (optional per-group weights) plus the quantizer's auxiliary term.
 
+**The quantizer needs a warmup.** Switching the grid on at step 0 collapses the codebook to a single code and the
+encoder to a constant. `train.quantizer_warmup_steps` (10,000 by default) trains the plain autoencoder first; after
+that the codebook stays nearly fully used. Evaluations run during the warmup score the continuous path and are
+marked `eval/quantized: 0`.
+
 ## Data
 
 Chunks come from the `action_chunks` package (mixture R0_v2.1, 95 embodiments, manifest `r0_v2.1-6885099`):

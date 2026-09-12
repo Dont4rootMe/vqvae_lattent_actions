@@ -30,3 +30,17 @@ def test_model_report_extra(tiny_model_config):
     extra = model_report_extra(model)
     assert extra["num_tokens"] == 4 and extra["vocab_size"] == 16 and extra["bits_per_chunk"] == 16.0
     assert extra["quantizer"]["type"] == "fsq" and extra["parameters"] > 0
+
+
+def test_evaluate_can_skip_quantization_during_warmup(tiny_model_config, tiny_eval_set, device):
+    """During the quantizer warmup the model is a plain autoencoder, so scoring it through the grid is
+    meaningless; `quantize=False` must score the continuous path and say so."""
+    torch.manual_seed(0)
+    model = HierActionTokenizer(tiny_model_config).eval()
+    quantized = evaluate_tokenizer(model, tiny_eval_set, batch_size=4, device=device)
+    continuous = evaluate_tokenizer(model, tiny_eval_set, batch_size=4, device=device, quantize=False)
+    assert quantized["usage"]["quantized"] is True
+    assert continuous["usage"]["quantized"] is False
+    assert continuous["usage"]["codes_used"] == 0 and continuous["usage"]["perplexity"] == 1.0
+    assert continuous["total"]["rmse"] < quantized["total"]["rmse"]      # no grid error on the continuous path
+    assert continuous["total"]["n"] == len(tiny_eval_set)

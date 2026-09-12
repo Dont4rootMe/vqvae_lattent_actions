@@ -12,8 +12,12 @@ from .metrics import MetricAccumulator
 
 
 @torch.no_grad()
-def evaluate_tokenizer(model, eval_set: EvalSet, *, batch_size: int = 1024, device: Any = None) -> dict:
-    """Reconstruction metrics per embodiment plus codebook usage; token length is constant (N)."""
+def evaluate_tokenizer(model, eval_set: EvalSet, *, batch_size: int = 1024, device: Any = None,
+                       quantize: bool = True) -> dict:
+    """Reconstruction metrics per embodiment plus codebook usage; token length is constant (N).
+
+    `quantize=False` scores the continuous autoencoder, the only meaningful measurement while the quantizer
+    warmup is still running; codebook usage is then reported as absent rather than as a collapsed codebook."""
     device = torch.device(device) if device is not None else next(model.parameters()).device
     was_training = model.training
     model.eval()
@@ -22,17 +26,18 @@ def evaluate_tokenizer(model, eval_set: EvalSet, *, batch_size: int = 1024, devi
     for actions, valid, _time_valid, emb in eval_set.batches(batch_size):
         x = torch.as_tensor(actions, device=device)
         m = torch.as_tensor(valid, device=device)
-        tokens, recon = model.encode_decode(x, m)
+        tokens, recon = model.encode_decode(x, m, quantize=quantize)
         accumulator.add(actions, recon.float().cpu().numpy(), valid, emb, [model.num_tokens] * len(actions))
-        counts += torch.bincount(tokens.reshape(-1).cpu(), minlength=model.vocab_size)
+        if quantize:
+            counts += torch.bincount(tokens.reshape(-1).cpu(), minlength=model.vocab_size)
     summary = accumulator.summary()
     used = int((counts > 0).sum())
     probs = counts.float() / counts.sum().clamp_min(1)
     nonzero = probs[probs > 0]
+    perplexity = float(torch.exp(-(nonzero * nonzero.log()).sum())) if quantize else 1.0
     summary["usage"] = {"vocab_size": model.vocab_size, "tokens_per_chunk": model.num_tokens,
-                        "bits_per_chunk": model.bits_per_chunk, "codes_used": used,
-                        "usage_percent": 100.0 * used / model.vocab_size,
-                        "perplexity": float(torch.exp(-(nonzero * nonzero.log()).sum()))}
+                        "bits_per_chunk": model.bits_per_chunk, "quantized": bool(quantize), "codes_used": used,
+                        "usage_percent": 100.0 * used / model.vocab_size, "perplexity": perplexity}
     if was_training:
         model.train()
     return summary

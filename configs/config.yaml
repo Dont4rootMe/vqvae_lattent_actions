@@ -25,7 +25,9 @@ train:
   ckpt_every: 5000
   eval_batch_size: 1024
   mixed_precision: bf16
-  quantizer_warmup_steps: 0      # >0 trains without the quantizer for that many steps first
+  # The quantizer must not be switched on from step 0: it collapses to a single code and the encoder follows it
+  # into a constant. Training the plain autoencoder first fixes this (see docs/runs.md, 2026-09-12).
+  quantizer_warmup_steps: 10000
 
 comet:
   mode: auto               # auto | online | offline | disabled

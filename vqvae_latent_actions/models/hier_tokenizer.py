@@ -236,9 +236,12 @@ class HierActionTokenizer(nn.Module):
         return self.decode_latents(self.quantizer.indices_to_codes(tokens), mask)
 
     @torch.no_grad()
-    def encode_decode(self, actions: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
-        quantized = self.quantize(self.encode_continuous(actions, mask))
-        return quantized.indices, self.decode_latents(quantized.codes, mask)
+    def encode_decode(self, actions: Tensor, mask: Tensor, quantize: bool = True) -> tuple[Tensor, Tensor]:
+        """Tokens are always returned; `quantize=False` reconstructs from the continuous latents instead of the
+        grid, which is what the model is actually trained on during the quantizer warmup."""
+        latents = self.encode_continuous(actions, mask)
+        quantized = self.quantize(latents)
+        return quantized.indices, self.decode_latents(quantized.codes if quantize else latents, mask)
 
     # ------------------------------------------------------------------ persistence
     def save_pretrained(self, directory: str | Path) -> Path:
