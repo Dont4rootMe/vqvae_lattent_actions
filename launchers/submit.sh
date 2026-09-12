@@ -14,6 +14,7 @@ rm -f "$DIR/exit_code"
 ENVS="RUN_NAME=$RUN_NAME MODEL=${MODEL:-hier_fsq} NPROC=8 STEPS=${STEPS:-300000} WORKERS=${WORKERS:-10}"
 [ -n "$NTOK" ] && ENVS="$ENVS NTOK=$NTOK"
 [ -n "$LEVELS" ] && ENVS="$ENVS LEVELS=$LEVELS"
+[ -n "$EXTRA" ] && ENVS="$ENVS EXTRA=$EXTRA"      # hydra overrides, ';'-separated; train.sh splits them"
 CMD="cd $DIR && env $ENVS bash --noprofile --norc $DIR/train.sh"
 echo "[submit] lerobot-research-${TAG}-hier: $CMD"
 # the team 8gpu quota is often fully used, so wait for a team slot instead of being refused outright

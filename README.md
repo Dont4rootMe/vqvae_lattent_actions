@@ -22,11 +22,12 @@ robot state.
 
 Loss: masked MSE over real entries only (optional per-group weights) plus the quantizer's auxiliary term.
 
-**The quantizer needs a warmup.** Quantizing from step 0 collapses the code to a single value and the encoder to
-a constant. `train.quantizer_warmup_steps` (10,000 by default) trains the plain autoencoder first. The latents still
-pass through the quantizer's `bound`, so both phases share one value range; without that the encoder drifts out of
-the range a fixed grid can resolve. Evaluations during the warmup score the continuous path and are marked
-`eval/quantized: 0`.
+**A fixed grid needs a warmup; a learned codebook does not.** Quantizing with FSQ from step 0 collapses the code
+to a single value and the encoder to a constant, so `train.quantizer_warmup_steps` (10,000 by default) trains the
+plain autoencoder first, and the latents pass through the quantizer's `bound` so both phases share one value range.
+VQ-EMA, the default arm, needs none of this: its codebook follows whatever scale the encoder settles on, and at an
+identical budget `quantizer_warmup_steps=0` used 103 of 110 bits against 95 with a warmup. The default stays at
+10,000 because it is the safe value for every arm; pass 0 for the learned codebook.
 
 **Watch the per-position numbers, not the pooled ones.** `eval/perplexity` counts all token positions together and
 happily reports 2031 of 2048 codes while three of ten positions carry one bit each. `eval/min_position_perplexity`
