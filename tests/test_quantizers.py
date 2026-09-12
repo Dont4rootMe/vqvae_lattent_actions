@@ -93,3 +93,32 @@ def test_lfq_optional():
     out = q(z)
     assert q.vocab_size == 256 and q.code_dim == 8
     assert out.indices.shape == (2, 3) and int(out.indices.max()) < 256
+
+
+def test_fsq_bound_is_the_code_without_rounding():
+    """`bound` is what the decoder must see while the quantizer is warming up: the same value range it will get
+    once the grid is switched on. Without it the encoder drifts into tanh saturation and most levels go unused."""
+    q = FSQ(levels=[8, 8, 8, 4])
+    z = torch.randn(4, 6, 4) * 3
+    bounded = q.bound(z)
+    assert bounded.shape == z.shape
+    torch.testing.assert_close(torch.round(bounded * q._half_width) / q._half_width, q(z).codes)
+    grid = q.indices_to_codes(torch.arange(q.vocab_size))
+    lo, hi = float(grid.min()), float(grid.max())
+    for scale in (1.0, 50.0):
+        b = q.bound(torch.randn(8, 8, 4) * scale)
+        assert lo - 0.01 <= float(b.min()) and float(b.max()) <= hi + 0.01
+        assert torch.isfinite(b).all()
+
+
+def test_bound_defaults_to_identity_for_learned_codebooks():
+    """A learned codebook follows whatever scale the encoder settles on, so it needs no bounding."""
+    q = VQEMA(vocab_size=8, code_dim=3)
+    z = torch.randn(2, 5, 3)
+    torch.testing.assert_close(q.bound(z), z)
+
+
+def test_fsq_saturation_reports_how_much_of_the_grid_is_out_of_reach():
+    q = FSQ(levels=[8, 8, 8, 4])
+    assert q.saturation(torch.zeros(4, 4)) == 0.0
+    assert q.saturation(torch.full((4, 4), 50.0)) == 1.0

@@ -93,7 +93,8 @@ def test_loss_backward_reaches_every_parameter(tiny_model_config, layout):
 
 
 def test_forward_can_skip_quantisation(tiny_model_config, layout):
-    """The warmup phase trains the plain autoencoder, so the reconstruction must come from raw latents."""
+    """The warmup phase trains the plain autoencoder, so the reconstruction comes from unrounded latents that
+    are still held inside the range the grid will impose."""
     torch.manual_seed(0)
     model = HierActionTokenizer(tiny_model_config).eval()
     mask = _mask(layout, 2, 10, ["left_arm.joints", "head.joints"])
@@ -102,7 +103,8 @@ def test_forward_can_skip_quantisation(tiny_model_config, layout):
     plain = model(actions, mask, quantize=False)
     assert float(plain["aux_loss"]) == 0.0
     assert not torch.allclose(quantised["recon"], plain["recon"])
-    torch.testing.assert_close(plain["recon"], model.decode_latents(plain["latents"], mask))
+    torch.testing.assert_close(plain["recon"],
+                               model.decode_latents(model.quantizer.bound(plain["latents"]), mask))
     assert torch.count_nonzero(plain["recon"][~mask]) == 0
 
 
@@ -127,3 +129,18 @@ def test_detokenize_matches_forward_and_survives_save_load(model, layout, tmp_pa
     tokens2, recon2 = again.encode_decode(actions, mask)
     assert torch.equal(tokens, tokens2)
     torch.testing.assert_close(recon, recon2)
+
+
+def test_warmup_decodes_the_bounded_latents(model, layout):
+    """While the quantizer is off the decoder must still see the value range it gets once the grid is on.
+    Raw latents let the encoder drift into tanh saturation, which pins most levels and wastes the vocabulary."""
+    b, t = 2, 10
+    mask = _mask(layout, b, t, ["left_arm.joints", "base.velocity"])
+    actions = torch.randn(b, t, layout.total_dim) * mask
+    out = model(actions, mask, quantize=False)
+    latents = model.encode_continuous(actions, mask)
+    bounded = model.quantizer.bound(latents).detach()
+    torch.testing.assert_close(out["recon"], model.decode_latents(bounded, mask))
+    assert not torch.allclose(out["recon"], model.decode_latents(latents, mask))
+    grid = model.quantizer.indices_to_codes(torch.arange(model.vocab_size))
+    assert float(bounded.min()) >= float(grid.min()) - 0.01 and float(bounded.max()) <= float(grid.max()) + 0.01

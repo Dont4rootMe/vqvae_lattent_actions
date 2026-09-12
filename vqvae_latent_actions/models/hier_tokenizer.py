@@ -214,10 +214,12 @@ class HierActionTokenizer(nn.Module):
     # ------------------------------------------------------------------ full passes
     def forward(self, actions: Tensor, mask: Tensor, quantize: bool = True) -> dict[str, Tensor]:
         """`quantize=False` trains the plain autoencoder: useful as a warmup so the latents become informative
-        before the grid is imposed on them."""
+        before the grid is imposed on them. The latents still pass through the quantizer's `bound`, so the warmup
+        and the quantized phase share one value range; feeding the decoder raw latents instead lets the encoder
+        drift out of the grid's resolvable range and most levels then go unused."""
         latents = self.encode_continuous(actions, mask)
         quantized = self.quantize(latents)
-        codes = quantized.codes if quantize else latents
+        codes = quantized.codes if quantize else self.quantizer.bound(latents)
         recon = self.decode_latents(codes, mask)
         target = actions.masked_fill(~mask, 0.0).to(recon.dtype)
         weights = mask.to(recon.dtype) * self.dim_weights.view(1, 1, -1).to(recon.dtype)
@@ -241,7 +243,8 @@ class HierActionTokenizer(nn.Module):
         grid, which is what the model is actually trained on during the quantizer warmup."""
         latents = self.encode_continuous(actions, mask)
         quantized = self.quantize(latents)
-        return quantized.indices, self.decode_latents(quantized.codes if quantize else latents, mask)
+        codes = quantized.codes if quantize else self.quantizer.bound(latents)
+        return quantized.indices, self.decode_latents(codes, mask)
 
     # ------------------------------------------------------------------ persistence
     def save_pretrained(self, directory: str | Path) -> Path:

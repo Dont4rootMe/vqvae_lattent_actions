@@ -35,6 +35,18 @@ class Quantizer(nn.Module):
     def forward(self, z: Tensor) -> QuantizerOutput:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def bound(self, z: Tensor) -> Tensor:
+        """The value range the decoder sees once quantization is on, without the rounding.
+
+        Identity for learned codebooks: they follow whatever scale the encoder settles on. FSQ overrides it,
+        because its grid is fixed and an unbounded encoder output saturates the tanh and pins most levels.
+        """
+        return z
+
+    def saturation(self, z: Tensor) -> float:
+        """Fraction of the code that sits where the quantizer can no longer resolve it. 0 unless bounded."""
+        return 0.0
+
     def indices_to_codes(self, indices: Tensor) -> Tensor:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -68,6 +80,13 @@ class FSQ(Quantizer):
 
     def _bound(self, z: Tensor) -> Tensor:
         return torch.tanh(z + self._shift) * self._half - self._offset
+
+    def bound(self, z: Tensor) -> Tensor:
+        return self._bound(z.float()) / self._half_width
+
+    def saturation(self, z: Tensor) -> float:
+        inner = torch.tanh(z.float() + self._shift)
+        return float((inner.abs() > 0.99).float().mean())
 
     def forward(self, z: Tensor) -> QuantizerOutput:
         z = z.float()

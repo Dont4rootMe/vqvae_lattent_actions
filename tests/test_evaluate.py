@@ -44,3 +44,21 @@ def test_evaluate_can_skip_quantization_during_warmup(tiny_model_config, tiny_ev
     assert continuous["usage"]["codes_used"] == 0 and continuous["usage"]["perplexity"] == 1.0
     assert continuous["total"]["rmse"] < quantized["total"]["rmse"]      # no grid error on the continuous path
     assert continuous["total"]["n"] == len(tiny_eval_set)
+
+
+def test_evaluate_reports_usage_per_token_position(tiny_model_config, tiny_eval_set, device):
+    """Pooling all positions into one histogram hides dead positions: a checkpoint once showed 2031 of 2048
+    codes 'used' while three of its ten positions carried about one bit each."""
+    torch.manual_seed(0)
+    model = HierActionTokenizer(tiny_model_config).eval()
+    usage = evaluate_tokenizer(model, tiny_eval_set, batch_size=4, device=device)["usage"]
+    per_position = usage["per_position"]
+    assert len(per_position) == model.num_tokens
+    for entry in per_position:
+        assert 1 <= entry["codes_used"] <= model.vocab_size
+        assert entry["perplexity"] >= 1.0 and entry["bits"] >= 0.0
+    assert usage["min_position_perplexity"] == min(e["perplexity"] for e in per_position)
+    assert usage["perplexity"] >= usage["min_position_perplexity"]
+
+    continuous = evaluate_tokenizer(model, tiny_eval_set, batch_size=4, device=device, quantize=False)["usage"]
+    assert continuous["per_position"] == [] and continuous["min_position_perplexity"] == 1.0

@@ -1,6 +1,7 @@
 """Scoring a tokenizer on the shared eval set: reconstruction error, codebook usage, padding invariance."""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -9,6 +10,20 @@ import torch
 from ..data.chunks import EvalSet
 from ..models.quantizers import code_usage
 from .metrics import MetricAccumulator
+
+
+def _histogram(counts: torch.Tensor, vocab_size: int) -> dict:
+    """How many codes a histogram uses and how evenly, in codes and in bits."""
+    probs = counts.float() / counts.sum().clamp_min(1)
+    nonzero = probs[probs > 0]
+    entropy = float(-(nonzero * nonzero.log()).sum())
+    used = int((counts > 0).sum())
+    return {"codes_used": used, "usage_percent": 100.0 * used / vocab_size,
+            "perplexity": math.exp(entropy), "bits": entropy / math.log(2)}
+
+
+def _empty_histogram(vocab_size: int) -> dict:
+    return {"codes_used": 0, "usage_percent": 0.0, "perplexity": 1.0, "bits": 0.0}
 
 
 @torch.no_grad()
@@ -22,22 +37,25 @@ def evaluate_tokenizer(model, eval_set: EvalSet, *, batch_size: int = 1024, devi
     was_training = model.training
     model.eval()
     accumulator = MetricAccumulator(eval_set.embodiment_ids)
-    counts = torch.zeros(model.vocab_size, dtype=torch.long)
+    counts = torch.zeros(model.num_tokens, model.vocab_size, dtype=torch.long)
+    position_offset = torch.arange(model.num_tokens).view(1, -1) * model.vocab_size
     for actions, valid, _time_valid, emb in eval_set.batches(batch_size):
         x = torch.as_tensor(actions, device=device)
         m = torch.as_tensor(valid, device=device)
         tokens, recon = model.encode_decode(x, m, quantize=quantize)
         accumulator.add(actions, recon.float().cpu().numpy(), valid, emb, [model.num_tokens] * len(actions))
         if quantize:
-            counts += torch.bincount(tokens.reshape(-1).cpu(), minlength=model.vocab_size)
+            flat = tokens.cpu().long() + position_offset
+            counts += torch.bincount(flat.reshape(-1), minlength=counts.numel()).view_as(counts)
     summary = accumulator.summary()
-    used = int((counts > 0).sum())
-    probs = counts.float() / counts.sum().clamp_min(1)
-    nonzero = probs[probs > 0]
-    perplexity = float(torch.exp(-(nonzero * nonzero.log()).sum())) if quantize else 1.0
+    pooled = _histogram(counts.sum(dim=0), model.vocab_size) if quantize else _empty_histogram(model.vocab_size)
+    per_position = [_histogram(counts[i], model.vocab_size) for i in range(model.num_tokens)] if quantize else []
     summary["usage"] = {"vocab_size": model.vocab_size, "tokens_per_chunk": model.num_tokens,
-                        "bits_per_chunk": model.bits_per_chunk, "quantized": bool(quantize), "codes_used": used,
-                        "usage_percent": 100.0 * used / model.vocab_size, "perplexity": perplexity}
+                        "bits_per_chunk": model.bits_per_chunk, "quantized": bool(quantize), **pooled,
+                        "per_position": per_position,
+                        # the pooled figure hides dead positions; these two are what the bottleneck really carries
+                        "min_position_perplexity": min((e["perplexity"] for e in per_position), default=1.0),
+                        "effective_bits_per_chunk": float(sum(e["bits"] for e in per_position))}
     if was_training:
         model.train()
     return summary

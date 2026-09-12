@@ -128,9 +128,13 @@ def train(cfg: TrainConfig) -> dict:
         total, usage = summary["total"], summary["usage"]
         logger.log_metrics({"eval/rmse": total["rmse"], "eval/l1": total["l1"], "eval/max_abs": total["max_abs_mean"],
                             "eval/codes_used": usage["codes_used"], "eval/perplexity": usage["perplexity"],
+                            "eval/min_position_perplexity": usage["min_position_perplexity"],
+                            "eval/effective_bits": usage["effective_bits_per_chunk"],
                             "eval/quantized": int(quantized),
                             "eval/padding_mismatch": summary["padding_invariance_mismatch"]}, step=current, split="eval")
-        codes = (f"codes={usage['codes_used']}/{usage['vocab_size']} perplexity={usage['perplexity']:.0f}"
+        codes = (f"codes={usage['codes_used']}/{usage['vocab_size']} perplexity={usage['perplexity']:.0f} "
+                 f"min_pos_ppl={usage['min_position_perplexity']:.1f} "
+                 f"bits={usage['effective_bits_per_chunk']:.0f}/{usage['bits_per_chunk']:.0f}"
                  if quantized else "continuous (quantizer warmup)")
         accelerator.print(f"eval step {current}: rmse={total['rmse']:.5f} l1={total['l1']:.5f} {codes}")
         return summary
@@ -174,8 +178,12 @@ def train(cfg: TrainConfig) -> dict:
 
         if step % cfg.log_every == 0:
             loss = accelerator.gather(output["loss"].detach().float().reshape(1)).mean().item()
+            latents = output["latents"].detach()
             record = {"step": step, "loss": loss, "recon_mse": float(output["recon_mse"]),
                       "aux_loss": float(output["aux_loss"]), "quantized": int(quantize),
+                      # an encoder that drifts out of the quantizer's range silently loses most of the vocabulary
+                      "latent_abs_mean": float(latents.abs().mean()),
+                      "latent_saturation": accelerator.unwrap_model(model).quantizer.saturation(latents),
                       "lr": scheduler.get_last_lr()[0],
                       "chunks_seen": seen, "steps_per_s": cfg.log_every / max(time.time() - last_log, 1e-9),
                       "elapsed_s": time.time() - start_time}
