@@ -1,0 +1,10 @@
+defaults:
+  - hier_fsq
+
+quantizer:
+  type: gumbel
+  vocab_size: 2048
+  code_dim: 64
+  out_dim: 64
+  temperature: 1.0
+  entropy_weight: 0.01

@@ -1,0 +1,8 @@
+defaults:
+  - hier_fsq
+
+quantizer:
+  type: lfq
+  vocab_size: 2048
+  entropy_loss_weight: 0.1
+  diversity_gamma: 1.0

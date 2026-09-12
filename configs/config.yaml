@@ -1,44 +1,40 @@
 defaults:
-  - model: fsq_vqvae
+  - model: hier_fsq
+  - data: r0_v2_1
   - _self_
 
-seed: 42
+run_name: hier-fsq-n10-v2048
 
-experiment_name: fsq_vqvae_initial
-
-trainer:
-  num_steps: 100000
-  log_interval: 10
-  val_interval: 500
-  save_interval: 1000
-  max_eval_batches: 3
-  gradient_accumulation_steps: null
-  mixed_precision: "bf16"
-  max_grad_norm: 1.0
-  output_dir: outputs/${experiment_name}/${now:%Y-%m-%d_%H-%M-%S}
-
-optimizer:
+train:
+  out_dir: ${oc.env:VQLA_OUT,outputs}/${run_name}
+  run_name: ${run_name}
+  steps: 300000
+  batch_size: 256          # per process
   lr: 3.0e-4
-  weight_decay: 0.2
-  betas: [0.9, 0.999]
+  min_lr_ratio: 0.1
+  weight_decay: 0.01
+  betas: [0.9, 0.95]
+  warmup_steps: 2000
+  schedule: cosine         # cosine | constant
+  grad_clip: 1.0
+  num_workers: 10
+  samples_per_episode: 8
+  seed: 0
+  log_every: 100
+  eval_every: 10000
+  ckpt_every: 5000
+  eval_batch_size: 1024
+  mixed_precision: bf16
 
-scheduler:
-  warmup_steps: 1000
-  total_steps: ${trainer.num_steps}
-  min_lr: 1.0e-5
-
-dataset:
-  batch_size: 128
-
-clearml:
-  enable: true
-  project_name: vqvae-latent-actions
-  task_name: ${experiment_name}
-  tags: ["vqvae", "latent actions"]
+comet:
+  mode: auto               # auto | online | offline | disabled
+  workspace: dont4rootme
+  project: hier-action-tokenizer
+  tags: [hier-tokenizer, unified-119]
 
 hydra:
   run:
-    dir: outputs/${experiment_name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${train.out_dir}/hydra
   job_logging:
     root:
       level: INFO

@@ -1,0 +1,9 @@
+defaults:
+  - hier_fsq
+
+quantizer:
+  type: vq
+  vocab_size: 2048
+  code_dim: 64
+  commitment: 0.25
+  decay: 0.99

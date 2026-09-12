@@ -1,0 +1,4 @@
+# R0_v2.1 mixture through action_chunks. Paths default to the cluster and can be overridden by environment.
+manifest: ${oc.env:VQLA_MANIFEST,/mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov/projects/action_tokenization/action_chunks/manifests/r0_v2.1-6885099}
+cache_dir: ${oc.env:VQLA_CACHE,/mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov/projects/action_tokenization/action_chunks_index_cache}
+eval_set: ${oc.env:VQLA_EVALSET,/mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov/projects/action_tokenization/runs/eval_set/eval_set-05d18b2b-val500.npz}
