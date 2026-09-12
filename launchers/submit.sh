@@ -11,11 +11,16 @@ cd /mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov
 mkdir -p "$DIR"
 cp "$SRC/common.sh" "$SRC/train.sh" "$DIR/"
 rm -f "$DIR/exit_code"
-ENVS="RUN_NAME=$RUN_NAME MODEL=${MODEL:-hier_vq} NPROC=8 STEPS=${STEPS:-300000} WORKERS=${WORKERS:-10}"
+CLASS="${CLASS:-8gpu}"                            # 1gpu for probes, 8gpu for production
+ENVS="RUN_NAME=$RUN_NAME MODEL=${MODEL:-hier_vq} NPROC=${NPROC:-8} STEPS=${STEPS:-300000} WORKERS=${WORKERS:-10}"
+for var in EVAL_EVERY CKPT_EVERY BATCH; do
+  eval "value=\${$var:-}"
+  [ -n "$value" ] && ENVS="$ENVS $var=$value"
+done
 [ -n "$NTOK" ] && ENVS="$ENVS NTOK=$NTOK"
 [ -n "$LEVELS" ] && ENVS="$ENVS LEVELS=$LEVELS"
 [ -n "$EXTRA" ] && ENVS="$ENVS EXTRA=$EXTRA"      # hydra overrides, ';'-separated; train.sh splits them"
 CMD="cd $DIR && env $ENVS bash --noprofile --norc $DIR/train.sh"
 echo "[submit] lerobot-research-${TAG}-hier: $CMD"
 # the team 8gpu quota is often fully used, so wait for a team slot instead of being refused outright
-bot submit -t 8gpu -H 48 -n "lerobot-research-${TAG}-hier" -c "$CMD" ${QUEUE_FLAGS:---team-wait} --json | tee "$DIR/submit.json"
+bot submit -t "$CLASS" -H 48 -n "lerobot-research-${TAG}-hier" -c "$CMD" ${QUEUE_FLAGS:---team-wait} --json | tee "$DIR/submit.json"
