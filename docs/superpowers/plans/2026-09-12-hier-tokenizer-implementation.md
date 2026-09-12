@@ -1906,7 +1906,7 @@ def _config(tmp_path, tiny_manifest, eval_path, steps: int) -> TrainConfig:
         model={"horizon": 10, "max_horizon": 16, "num_tokens": 4, "dim": 32, "heads": 4, "free_queries": 2,
                "enc_step_layers": 1, "enc_time_layers": 1, "enc_latent_layers": 1, "dec_latent_layers": 1, "dec_layers": 1,
                "quantizer": {"type": "fsq", "levels": [4, 4]}},
-        steps=steps, batch_size=4, lr=1e-3, warmup_steps=2, num_workers=0, log_every=1, eval_every=2, ckpt_every=2,
+        steps=steps, batch_size=4, lr=1e-3, warmup_steps=3, num_workers=0, log_every=1, eval_every=2, ckpt_every=2,
         eval_batch_size=8, mixed_precision="no", comet={"mode": "disabled"}, run_name="unit")
 
 
@@ -1936,7 +1936,7 @@ def test_lr_follows_the_schedule_every_step(tmp_path, tiny_manifest, tiny_eval_s
     from vqvae_latent_actions.data.chunks import save_eval_set
     eval_path = tmp_path / "eval.npz"
     save_eval_set(tiny_eval_set, eval_path)
-    cfg = _config(tmp_path, tiny_manifest, eval_path, steps=4)
+    cfg = _config(tmp_path, tiny_manifest, eval_path, steps=6)   # warmup 3 then cosine decay, so lr rises and falls
     train(cfg)
     rows = [json.loads(l) for l in (tmp_path / "run" / "train_log.jsonl").read_text().splitlines()]
     schedule = lr_lambda(cfg)
@@ -1972,12 +1972,15 @@ class RunLogger:
     def __init__(self, *, mode: str = "auto", project: str | None = None, workspace: str | None = None,
                  experiment_name: str | None = None, tags: list[str] | None = None,
                  offline_directory: str | Path | None = None, jsonl_path: str | Path | None = None,
-                 config: Mapping[str, Any] | None = None, enabled: bool = True) -> None:
+                 eval_jsonl_path: str | Path | None = None, config: Mapping[str, Any] | None = None,
+                 enabled: bool = True) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
-        self.jsonl_path = Path(jsonl_path) if jsonl_path else None
-        if self.jsonl_path:
-            self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        # training steps and evaluations go to different files: one row per step, no mixed schemas
+        self.jsonl_paths = {"train": Path(jsonl_path) if jsonl_path else None,
+                            "eval": Path(eval_jsonl_path) if eval_jsonl_path else (Path(jsonl_path) if jsonl_path else None)}
+        for path in {p for p in self.jsonl_paths.values() if p}:
+            path.parent.mkdir(parents=True, exist_ok=True)
         self.experiment = None
         self._mode = "disabled"
         if not enabled or mode == "disabled":
@@ -2029,11 +2032,12 @@ class RunLogger:
         if self.experiment is not None:
             self.experiment.log_parameters(_flatten(params))
 
-    def log_metrics(self, metrics: Mapping[str, Any], step: int) -> None:
+    def log_metrics(self, metrics: Mapping[str, Any], step: int, split: str = "train") -> None:
         if self.experiment is not None:
             self.experiment.log_metrics({k: v for k, v in metrics.items() if isinstance(v, (int, float))}, step=step)
-        if self.jsonl_path:
-            with self.jsonl_path.open("a") as handle:
+        path = self.jsonl_paths.get(split)
+        if path:
+            with path.open("a") as handle:
                 handle.write(json.dumps({"step": int(step), **{k: v for k, v in metrics.items()}}) + "\n")
 
     def log_other(self, key: str, value: Any) -> None:
@@ -2169,6 +2173,7 @@ def train(cfg: TrainConfig) -> dict:
     loader.dataset.set_epoch(step)
 
     logger = RunLogger(enabled=accelerator.is_main_process, jsonl_path=out / "train_log.jsonl",
+                       eval_jsonl_path=out / "eval_log.jsonl",
                        experiment_name=cfg.run_name, config={"train": asdict(cfg)},
                        mode=str(cfg.comet.get("mode", "auto")), project=cfg.comet.get("project"),
                        workspace=cfg.comet.get("workspace"), tags=cfg.comet.get("tags"),
@@ -2188,7 +2193,7 @@ def train(cfg: TrainConfig) -> dict:
         total, usage = summary["total"], summary["usage"]
         logger.log_metrics({"eval/rmse": total["rmse"], "eval/l1": total["l1"], "eval/max_abs": total["max_abs_mean"],
                             "eval/codes_used": usage["codes_used"], "eval/perplexity": usage["perplexity"],
-                            "eval/padding_mismatch": summary["padding_invariance_mismatch"]}, step=current)
+                            "eval/padding_mismatch": summary["padding_invariance_mismatch"]}, step=current, split="eval")
         accelerator.print(f"eval step {current}: rmse={total['rmse']:.5f} l1={total['l1']:.5f} "
                           f"codes={usage['codes_used']}/{usage['vocab_size']} perplexity={usage['perplexity']:.0f}")
         return summary

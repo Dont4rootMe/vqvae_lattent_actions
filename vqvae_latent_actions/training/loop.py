@@ -1,291 +1,204 @@
-"""Training loop orchestrator."""
+"""Step-based trainer: accelerate DDP, VLA-weighted sampling, periodic eval on the shared set, resume, export."""
 from __future__ import annotations
 
+import json
 import math
-import os
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any
 
-import matplotlib.pyplot as plt
 import torch
-from accelerate import Accelerator
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
-from torch.utils.data import DataLoader
 
-from ..models import FSQVQVAE
-from ..training.eval import evaluate
-from ..utils.logging import MetricLogger
-from ..utils.metrics import ValidationCurveTracker
-
-from tqdm import tqdm
+from ..data.chunks import batch_to_inputs, layout_from_manifest, load_eval_set, train_loader
+from ..models.hier_tokenizer import HierActionTokenizer, HierTokenizerConfig
+from .comet import RunLogger
+from .evaluate import evaluate_tokenizer, model_report_extra, padding_invariance_mismatch
+from .metrics import write_report
 
 
-def _move_batch_to_device(batch: Dict, device: torch.device) -> Dict:
-    return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+@dataclass
+class TrainConfig:
+    out_dir: str
+    manifest: str
+    eval_set: str
+    cache_dir: str | None = None
+    model: dict[str, Any] = field(default_factory=dict)
+    steps: int = 300_000
+    batch_size: int = 256
+    lr: float = 3e-4
+    min_lr_ratio: float = 0.1
+    weight_decay: float = 0.01
+    betas: tuple[float, float] = (0.9, 0.95)
+    warmup_steps: int = 2000
+    schedule: str = "cosine"
+    grad_clip: float = 1.0
+    num_workers: int = 10
+    samples_per_episode: int = 8
+    seed: int = 0
+    log_every: int = 100
+    eval_every: int = 10_000
+    ckpt_every: int = 5_000
+    eval_batch_size: int = 1024
+    mixed_precision: str = "bf16"
+    comet: dict[str, Any] = field(default_factory=dict)
+    run_name: str = "hier"
 
 
-def _get_model_dtype(model: torch.nn.Module) -> torch.dtype:
-    param = next(model.parameters(), None)
-    if param is not None:
-        return param.dtype
-    buffer = next(model.buffers(), None)
-    if buffer is not None:
-        return buffer.dtype
-    return torch.float32
+def lr_lambda(cfg: TrainConfig):
+    def factor(step: int) -> float:
+        if step < cfg.warmup_steps:
+            return (step + 1) / max(1, cfg.warmup_steps)
+        if cfg.schedule == "constant":
+            return 1.0
+        progress = min(1.0, (step - cfg.warmup_steps) / max(1, cfg.steps - cfg.warmup_steps))
+        return cfg.min_lr_ratio + (1 - cfg.min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+    return factor
 
 
-def _ensure_actions_dtype(batch: Dict, model: torch.nn.Module) -> Dict:
-    actions = batch.get("actions")
-    if not isinstance(actions, torch.Tensor):
-        return batch
-    target_dtype = _get_model_dtype(model)
-    if actions.dtype != target_dtype:
-        batch["actions"] = actions.to(dtype=target_dtype)
-    return batch
+def build_model(cfg: TrainConfig, layout) -> HierActionTokenizer:
+    return HierActionTokenizer(HierTokenizerConfig.from_dict({**cfg.model, "layout": layout.to_dict()}))
 
 
-def _compute_gradient_stats(model: torch.nn.Module) -> Dict[str, float]:
-    """Compute gradient statistics for logging."""
-    total_norm = 0.0
-    num_params = 0
-    max_grad = 0.0
-    min_grad = float('inf')
-    grad_sum = 0.0
-    
-    for p in model.parameters():
-        if p.grad is not None:
-            param_norm = p.grad.data.norm(2).item()
-            total_norm += param_norm ** 2
-            num_params += p.grad.numel()
-            grad_sum += p.grad.data.abs().sum().item()
-            max_grad = max(max_grad, p.grad.data.abs().max().item())
-            min_grad = min(min_grad, p.grad.data.abs().min().item())
-    
-    total_norm = total_norm ** 0.5
-    mean_grad = grad_sum / num_params if num_params > 0 else 0.0
-    
-    return {
-        'grad_norm': total_norm,
-        'grad_mean': mean_grad,
-        'grad_max': max_grad,
-        'grad_min': min_grad if min_grad != float('inf') else 0.0,
-    }
+def train(cfg: TrainConfig) -> dict:
+    from accelerate import Accelerator, DistributedDataParallelKwargs
+    from accelerate.utils import set_seed
 
-
-def _log_train_metrics(
-    accelerator: Accelerator,
-    logger: MetricLogger,
-    outputs,
-    lr: float,
-    step: int,
-    grad_stats: Optional[Dict[str, float]] = None,
-) -> None:
-    
-    metrics = {'lr': torch.tensor(lr, device=accelerator.device)}
-    
-    if hasattr(outputs, '__dataclass_fields__'):
-        field_names = outputs.__dataclass_fields__.keys()
-    else:
-        field_names = [name for name in dir(outputs) if not name.startswith("_")]
-    
-    for name in field_names:
-        value = getattr(outputs, name)
-        # Only process tensor attributes
-        if isinstance(value, torch.Tensor):
-            value = value.detach()
-            # Only log scalars or 1D tensors
-            if value.dim() < 1:
-                metrics[name] = value
-    
-    # Add gradient statistics if provided
-    if grad_stats is not None:
-        for name, value in grad_stats.items():
-            metrics[name] = torch.tensor(value, device=accelerator.device)
-
-    reduced = {}
-    for name, value in sorted(metrics.items(), key=lambda x: x[0]):
-        tensor = value if isinstance(value, torch.Tensor) else torch.tensor(value, device=accelerator.device)
-        gathered = accelerator.gather(tensor.detach())
-        reduced[name] = gathered.mean().item()        
+    # step_scheduler_with_optimizer=False: accelerate would otherwise advance the schedule once per process.
+    accelerator = Accelerator(mixed_precision=cfg.mixed_precision if cfg.mixed_precision != "no" else "no",
+                              step_scheduler_with_optimizer=False,
+                              kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False,
+                                                                            broadcast_buffers=True)])
+    rank, world = accelerator.process_index, accelerator.num_processes
+    device = accelerator.device
+    set_seed(cfg.seed, device_specific=True)
+    out = Path(cfg.out_dir)
     if accelerator.is_main_process:
-        logger.log("train", reduced, step)
-    
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "config.json").write_text(json.dumps(asdict(cfg), indent=1, default=str))
 
-def _save_checkpoint(
-    model: FSQVQVAE,
-    optimizer: Optimizer,
-    scheduler: Optional[LRScheduler],
-    accelerator: Accelerator,
-    output_dir: Path,
-    step: int,
-    tag: str,
-) -> None:
-    accelerator.wait_for_everyone()
+    layout = layout_from_manifest(cfg.manifest)
+    eval_set = load_eval_set(cfg.eval_set) if accelerator.is_main_process else None
+    model = build_model(cfg, layout).to(device)
+    decay = [p for _, p in model.named_parameters() if p.requires_grad and p.dim() >= 2]
+    no_decay = [p for _, p in model.named_parameters() if p.requires_grad and p.dim() < 2]
+    optimizer = torch.optim.AdamW([{"params": decay, "weight_decay": cfg.weight_decay},
+                                   {"params": no_decay, "weight_decay": 0.0}], lr=cfg.lr, betas=tuple(cfg.betas))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda(cfg))
+
+    step = 0
+    latest = out / "checkpoints" / "latest.pt"
+    if latest.exists():
+        payload = torch.load(latest, map_location="cpu", weights_only=False)
+        model.load_state_dict(payload["model"])
+        optimizer.load_state_dict(payload["optimizer"])
+        scheduler.load_state_dict(payload["scheduler"])
+        step = int(payload["step"])
+        accelerator.print(f"resumed from {latest} at step {step}")
+
+    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+
+    loader = train_loader(cfg.manifest, cfg.cache_dir, batch_size=cfg.batch_size, num_workers=cfg.num_workers,
+                          seed=cfg.seed * 1000 + rank, samples_per_episode=cfg.samples_per_episode,
+                          epoch_length=cfg.batch_size * (cfg.steps + 1), pin_memory=device.type == "cuda")
+    loader.dataset.set_epoch(step)
+
+    logger = RunLogger(enabled=accelerator.is_main_process, jsonl_path=out / "train_log.jsonl",
+                       eval_jsonl_path=out / "eval_log.jsonl",
+                       experiment_name=cfg.run_name, config={"train": asdict(cfg)},
+                       mode=str(cfg.comet.get("mode", "auto")), project=cfg.comet.get("project"),
+                       workspace=cfg.comet.get("workspace"), tags=cfg.comet.get("tags"),
+                       offline_directory=out / "comet_offline")
     if accelerator.is_main_process:
-        ckpt_dir = output_dir / "checkpoints" / f"{tag}_step_{step}"
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        unwrapped = accelerator.unwrap_model(model)
-        unwrapped.save_pretrained(str(ckpt_dir))
-        state = {
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict() if scheduler is not None else None,
-            "step": step,
-        }
-        torch.save(state, ckpt_dir / "trainer_state.pt")
+        extra = model_report_extra(accelerator.unwrap_model(model))
+        logger.log_params({"model": extra})
+        accelerator.print(f"model: {extra['parameters'] / 1e6:.1f}M params, {extra['num_tokens']} tokens x "
+                          f"{extra['vocab_size']} codes = {extra['bits_per_chunk']:.0f} bits/chunk")
 
+    def run_eval(current: int) -> dict:
+        target = accelerator.unwrap_model(model)
+        summary = evaluate_tokenizer(target, eval_set, batch_size=cfg.eval_batch_size, device=device)
+        summary["padding_invariance_mismatch"] = padding_invariance_mismatch(target, eval_set, device=device)
+        write_report(out / f"eval_step{current:07d}.json", f"{cfg.run_name}@{current}", summary,
+                     {"step": current, **model_report_extra(target)})
+        total, usage = summary["total"], summary["usage"]
+        logger.log_metrics({"eval/rmse": total["rmse"], "eval/l1": total["l1"], "eval/max_abs": total["max_abs_mean"],
+                            "eval/codes_used": usage["codes_used"], "eval/perplexity": usage["perplexity"],
+                            "eval/padding_mismatch": summary["padding_invariance_mismatch"]}, step=current, split="eval")
+        accelerator.print(f"eval step {current}: rmse={total['rmse']:.5f} l1={total['l1']:.5f} "
+                          f"codes={usage['codes_used']}/{usage['vocab_size']} perplexity={usage['perplexity']:.0f}")
+        return summary
 
-def run_train_loop(
-    cfg,
-    model: FSQVQVAE,
-    optimizer: Optimizer,
-    scheduler: Optional[LRScheduler],
-    accelerator: Accelerator,
-    dataloader_train: DataLoader,
-    dataloader_val: Dict[str, DataLoader],
-    metric_logger: MetricLogger,
-) -> None:
-    output_dir = Path(cfg.trainer.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    plot_dir = output_dir / "figures"
-    plot_dir.mkdir(parents=True, exist_ok=True)
+    def save_checkpoint() -> None:
+        if not accelerator.is_main_process:
+            return
+        directory = out / "checkpoints"
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = {"step": step, "model": accelerator.unwrap_model(model).state_dict(),
+                   "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "config": asdict(cfg)}
+        tmp = directory / "latest.tmp"
+        torch.save(payload, tmp)
+        tmp.replace(directory / "latest.pt")
 
-    tracker = ValidationCurveTracker()
-    global_step = 0
-    best_val = math.inf
-
-    max_steps = cfg.trainer.num_steps
-    log_interval = cfg.trainer.log_interval
-    val_interval = cfg.trainer.val_interval
-    save_interval = cfg.trainer.save_interval
-    grad_clip = cfg.trainer.max_grad_norm
-    
-    max_eval_batches = cfg.trainer.max_eval_batches
-
-    train_iterator = iter(dataloader_train)
-
-
-    pbar = tqdm(total=max_steps, desc="Training", leave=False)
-    while global_step < max_steps:
+    model.train()
+    start_time = last_log = time.time()
+    seen = 0
+    last_summary: dict = {}
+    iterator = iter(loader)
+    while step < cfg.steps:
         try:
-            batch = next(train_iterator)
-            pbar.update(1)
+            batch = next(iterator)
         except StopIteration:
-            train_iterator = iter(dataloader_train)
-            batch = next(train_iterator)
-            pbar.update(1)
+            loader.dataset.set_epoch(step + 1)
+            iterator = iter(loader)
+            batch = next(iterator)
+        actions, mask, _ = batch_to_inputs(batch)
+        actions, mask = actions.to(device, non_blocking=True), mask.to(device, non_blocking=True)
+        with accelerator.autocast():
+            output = model(actions, mask)
+        accelerator.backward(output["loss"])
+        if cfg.grad_clip:
+            accelerator.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
+        step += 1
+        seen += cfg.batch_size * world
 
-        batch = _move_batch_to_device(batch, accelerator.device)
-        batch = _ensure_actions_dtype(batch, model)
-        
-        with accelerator.accumulate(model):
-            outputs = model(batch["actions"])
-            accelerator.backward(outputs.loss)
-            
-            # Compute gradient statistics before clipping for accurate measurements
-            grad_stats = None
-            if accelerator.sync_gradients and global_step % log_interval == 0:
-                grad_stats = _compute_gradient_stats(model)
-            
-            if accelerator.sync_gradients and grad_clip is not None:
-                accelerator.clip_grad_norm_(model.parameters(), grad_clip)
-                
-            optimizer.step()
-            optimizer.zero_grad()
-            
-            if scheduler is not None:
-                scheduler.step()
-
-        global_step += 1
-        
-        if global_step % log_interval == 0 and accelerator.sync_gradients:
-            current_lr = optimizer.param_groups[0]["lr"]
-            _log_train_metrics(accelerator, metric_logger, outputs, current_lr, global_step, grad_stats)
-
-        if val_interval > 0 and global_step % val_interval == 0:
-            # All processes participate in evaluation for speed
-            per_dataset_metrics, aggregated_metrics, metric_names, per_dataset_token_counts = evaluate(
-                model, dataloader_val, accelerator, max_eval_batches
-            )
-            
-            # Only main process logs and saves
+        if step % cfg.log_every == 0:
+            loss = accelerator.gather(output["loss"].detach().float().reshape(1)).mean().item()
+            record = {"step": step, "loss": loss, "recon_mse": float(output["recon_mse"]),
+                      "aux_loss": float(output["aux_loss"]), "lr": scheduler.get_last_lr()[0],
+                      "chunks_seen": seen, "steps_per_s": cfg.log_every / max(time.time() - last_log, 1e-9),
+                      "elapsed_s": time.time() - start_time}
+            last_log = time.time()
             if accelerator.is_main_process:
-                # plot comparision of val metrics on datasets
-                for metric_name in metric_names:
-                    consolidation = {}
-                    for dataset_name, metrics in per_dataset_metrics.items():
-                        consolidation[dataset_name] = metrics[metric_name]
-                    metric_logger.log(f"val-consolidated/{metric_name}", consolidation, global_step, in_one_praph=True)
-                
-                # plot sepparately for each dataset
-                for dataset_name, metrics in per_dataset_metrics.items():
-                    metric_logger.log(f"val-dataset/{dataset_name}", metrics, global_step)
-                
-                # Log token utilization histograms from accumulated token_counts
-                if per_dataset_token_counts:
-                    # Histogram for all validation datasets combined
-                    all_token_counts = sum(per_dataset_token_counts.values())
-                    metric_logger.log_histogram(
-                        "token_histogram/all_datasets",
-                        "histogram",
-                        all_token_counts,
-                        global_step
-                    )
-                    
-                    # Histogram for each dataset separately
-                    for dataset_name, token_counts in per_dataset_token_counts.items():
-                        metric_logger.log_histogram(
-                            f"token_histogram/{dataset_name}",
-                            "histogram",
-                            token_counts,
-                            global_step
-                        )
-                
-                # if aggregated_metrics:
-                #     metric_logger.log("val-aggregation", aggregated_metrics, global_step)
-                #     tracker.update(global_step, aggregated_metrics)
-                    
-                #     fig = tracker.plot()
-                #     fig_path = plot_dir / f"val_metrics_step_{global_step}.png"
-                #     fig.savefig(fig_path)
-                #     metric_logger.log_figure("validation", f"step_{global_step}", fig, global_step)
-                #     os.environ["LAST_VAL_FIG"] = str(fig_path)
-                #     plt.close(fig)
-                # if aggregated_metrics and aggregated_metrics.get("loss", math.inf) < best_val:
-                #     best_val = aggregated_metrics["loss"]
-                #     _save_checkpoint(
-                #         model,
-                #         optimizer,
-                #         scheduler,
-                #         accelerator,
-                #         output_dir,
-                #         global_step,
-                #         tag="best",
-                #     )
-            
-            # Synchronize all processes after validation
+                logger.log_metrics(record, step=step)
+                accelerator.print(f"step {step}/{cfg.steps} loss={loss:.5f} recon={record['recon_mse']:.5f} "
+                                  f"lr={record['lr']:.2e} {record['steps_per_s']:.2f} it/s")
+
+        if step % cfg.eval_every == 0 or step == cfg.steps:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                last_summary = run_eval(step)
+                model.train()
+            accelerator.wait_for_everyone()
+        if step % cfg.ckpt_every == 0 or step == cfg.steps:
+            save_checkpoint()
             accelerator.wait_for_everyone()
 
-        if save_interval > 0 and global_step % save_interval == 0:
-            _save_checkpoint(
-                model,
-                optimizer,
-                scheduler,
-                accelerator,
-                output_dir,
-                global_step,
-                tag="ckpt",
-            )
+    if accelerator.is_main_process:
+        target = accelerator.unwrap_model(model)
+        export = target.save_pretrained(out / "final")
+        if not last_summary:
+            last_summary = run_eval(step)
+        write_report(out / "final_eval.json", cfg.run_name, last_summary,
+                     {"step": step, "export": str(export), **model_report_extra(target)})
+        logger.log_other("export", str(export))
+        logger.end()
+        accelerator.print(f"final export: {export}")
+    accelerator.wait_for_everyone()
+    return last_summary
 
-        if accelerator.sync_gradients and global_step >= max_steps:
-            break
 
-    _save_checkpoint(
-        model,
-        optimizer,
-        scheduler,
-        accelerator,
-        output_dir,
-        global_step,
-        tag="final",
-    )
+__all__ = ["TrainConfig", "train", "build_model", "lr_lambda"]
