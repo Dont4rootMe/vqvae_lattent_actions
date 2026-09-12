@@ -451,9 +451,10 @@ def test_vqema_learns_clusters_and_reports_indices():
     def batch():
         idx = torch.randint(0, 8, (64,))
         return (centers[idx] + torch.randn(64, 3) * 0.05).view(4, 16, 3)
-    q.train()
+    q.eval()
     start = batch()
-    first = float(((q(start).codes - start) ** 2).mean())
+    first = float(((q(start).codes - start) ** 2).mean())     # untrained codebook, before any initialisation
+    q.train()
     for _ in range(40):
         q(batch())
     errors = []
@@ -461,7 +462,9 @@ def test_vqema_learns_clusters_and_reports_indices():
         sample = batch()
         errors.append(((q(sample).codes - sample) ** 2).mean())
     err = float(torch.stack(errors).mean())
-    assert err < first and err < 0.5                                   # codebook moved onto the clusters
+    assert err < first and err < 0.05                                  # k-means++ init + EMA land on the clusters
+    distance_to_nearest_code = torch.cdist(centers, q.codebook).min(dim=1).values
+    assert float(distance_to_nearest_code.max()) < 0.5                 # every cluster is covered by some code
     out = q(batch())
     assert out.indices.shape == (4, 16) and int(out.indices.max()) < 8
     torch.testing.assert_close(q.indices_to_codes(out.indices), q.codebook[out.indices])
@@ -606,10 +609,13 @@ class VQEMA(Quantizer):
     """Classic VQ with EMA codebook updates, dead-code replacement and a commitment loss."""
 
     def __init__(self, vocab_size: int, code_dim: int, commitment: float = 0.25, decay: float = 0.99,
-                 eps: float = 1e-5, dead_threshold: float = 1.0) -> None:
+                 eps: float = 1e-5, dead_threshold: float = 1.0, kmeans_init: bool = True,
+                 kmeans_iters: int = 10, restart_ratio: float = 0.1) -> None:
         super().__init__()
         self.vocab_size, self.code_dim, self.out_dim = int(vocab_size), int(code_dim), int(code_dim)
         self.commitment, self.decay, self.eps, self.dead_threshold = float(commitment), float(decay), float(eps), float(dead_threshold)
+        self.kmeans_init, self.kmeans_iters = bool(kmeans_init), int(kmeans_iters)
+        self.restart_ratio = float(restart_ratio)   # codes used far less than average are restarted
         codebook = torch.randn(self.vocab_size, self.code_dim) * 0.1
         self.register_buffer("codebook", codebook)
         self.register_buffer("cluster_size", torch.ones(self.vocab_size))
@@ -631,9 +637,44 @@ class VQEMA(Quantizer):
         return tensor
 
     @torch.no_grad()
+    def _seed_plus_plus(self, flat: Tensor) -> Tensor:
+        """k-means++ seeding: each new code is drawn far from the ones already chosen.
+
+        Uniform seeding leaves whole clusters uncovered, and EMA cannot escape that afterwards (duplicated codes
+        keep enough usage to never look dead).
+        """
+        first = torch.randint(0, flat.shape[0], (1,), device=flat.device)
+        codes = [flat[first]]
+        nearest = (flat - codes[0]).pow(2).sum(dim=1)
+        for _ in range(self.vocab_size - 1):
+            total = nearest.sum()
+            if float(total) <= 0:
+                index = torch.randint(0, flat.shape[0], (1,), device=flat.device)
+            else:
+                index = torch.multinomial(nearest / total, 1)
+            chosen = flat[index]
+            codes.append(chosen)
+            nearest = torch.minimum(nearest, (flat - chosen).pow(2).sum(dim=1))
+        return torch.cat(codes, dim=0)
+
+    @torch.no_grad()
+    def _lloyd(self, flat: Tensor, codes: Tensor) -> Tensor:
+        for _ in range(self.kmeans_iters):
+            assignment = torch.cdist(flat, codes).argmin(dim=1)
+            onehot = F.one_hot(assignment, self.vocab_size).to(flat.dtype)
+            counts = onehot.sum(0)
+            moved = (onehot.t() @ flat) / counts.clamp_min(1.0).unsqueeze(1)
+            codes = torch.where(counts.unsqueeze(1) > 0, moved, codes)
+        return codes
+
+    @torch.no_grad()
     def _initialize(self, flat: Tensor) -> None:
-        pick = torch.randint(0, flat.shape[0], (self.vocab_size,), device=flat.device)
-        codes = self._broadcast(flat[pick].clone())
+        if self.kmeans_init and flat.shape[0] >= self.vocab_size:
+            codes = self._lloyd(flat, self._seed_plus_plus(flat))
+        else:
+            pick = torch.randint(0, flat.shape[0], (self.vocab_size,), device=flat.device)
+            codes = flat[pick].clone()
+        codes = self._broadcast(codes.contiguous())
         self.codebook.copy_(codes)
         self.embed_sum.copy_(codes)
         self.cluster_size.fill_(1.0)
@@ -657,10 +698,15 @@ class VQEMA(Quantizer):
                 total = self.cluster_size.sum()
                 smoothed = (self.cluster_size + self.eps) / (total + self.vocab_size * self.eps) * total
                 self.codebook.copy_(self.embed_sum / smoothed.unsqueeze(1))
-                dead = self.cluster_size < self.dead_threshold
+                floor = torch.clamp(self.cluster_size.mean() * self.restart_ratio, min=self.dead_threshold)
+                dead = self.cluster_size < floor
                 if bool(dead.any()):
-                    pick = torch.randint(0, flat.shape[0], (int(dead.sum()),), device=flat.device)
-                    replacement = self._broadcast(flat.detach()[pick].clone())
+                    count = int(dead.sum())
+                    far = torch.cdist(flat.detach(), self.codebook).min(dim=1).values   # worst-covered samples
+                    pick = far.topk(min(count, far.shape[0])).indices
+                    if pick.shape[0] < count:
+                        pick = pick.repeat(count // pick.shape[0] + 1)[:count]
+                    replacement = self._broadcast(flat.detach()[pick].clone().contiguous())
                     self.codebook[dead] = replacement
                     self.embed_sum[dead] = replacement
                     self.cluster_size[dead] = 1.0

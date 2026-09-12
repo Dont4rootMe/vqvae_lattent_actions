@@ -1,10 +1,7 @@
 """Model registry."""
-from .fsq_vqvae import FSQVQVAE, FSQQuantizer, FSQVQVAEOutput
-from .lfq_vqvae import LFQVQVAE, LFQQuantizer, LFQVQVAEOutput
-from .gmb_vqvae import GMBVQVAE, GMBQuantizer, GMBVQVAEOutput
+from .hier_tokenizer import HierActionTokenizer, HierTokenizerConfig
+from .quantizers import (FSQ, GumbelQuantizer, LFQWrapper, Quantizer, QuantizerOutput, VQEMA, build_quantizer,
+                         code_usage)
 
-__all__ = [
-    "FSQVQVAE", "FSQQuantizer", "FSQVQVAEOutput",
-    "LFQVQVAE", "LFQQuantizer", "LFQVQVAEOutput",
-    "GMBVQVAE", "GMBQuantizer", "GMBVQVAEOutput",
-]
+__all__ = ["HierActionTokenizer", "HierTokenizerConfig", "Quantizer", "QuantizerOutput", "FSQ", "VQEMA",
+           "LFQWrapper", "GumbelQuantizer", "build_quantizer", "code_usage"]
