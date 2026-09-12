@@ -5,13 +5,13 @@ set -e -o pipefail
 BASE=/mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov/projects/action_tokenization
 SRC=$BASE/vqvae_lattent_actions/launchers
 TAG="${TAG:?set TAG, e.g. r09}"
-RUN_NAME="${RUN_NAME:-hier-fsq-n10-v2048}"
+RUN_NAME="${RUN_NAME:-hier-vq-n10-v2048}"
 DIR=$BASE/runs/${TAG}_hier
 cd /mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov
 mkdir -p "$DIR"
 cp "$SRC/common.sh" "$SRC/train.sh" "$DIR/"
 rm -f "$DIR/exit_code"
-ENVS="RUN_NAME=$RUN_NAME MODEL=${MODEL:-hier_fsq} NPROC=8 STEPS=${STEPS:-300000} WORKERS=${WORKERS:-10}"
+ENVS="RUN_NAME=$RUN_NAME MODEL=${MODEL:-hier_vq} NPROC=8 STEPS=${STEPS:-300000} WORKERS=${WORKERS:-10}"
 [ -n "$NTOK" ] && ENVS="$ENVS NTOK=$NTOK"
 [ -n "$LEVELS" ] && ENVS="$ENVS LEVELS=$LEVELS"
 [ -n "$EXTRA" ] && ENVS="$ENVS EXTRA=$EXTRA"      # hydra overrides, ';'-separated; train.sh splits them"

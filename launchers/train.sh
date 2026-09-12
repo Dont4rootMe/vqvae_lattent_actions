@@ -2,8 +2,8 @@
 # Training on the bot 8gpu class. Overrides: RUN_NAME, MODEL, NTOK, LEVELS, STEPS, NPROC, BATCH, EXTRA.
 source "$(dirname "$0")/common.sh"
 NPROC="${NPROC:-8}"
-RUN_NAME="${RUN_NAME:-hier-fsq-n10-v2048}"
-MODEL="${MODEL:-hier_fsq}"
+RUN_NAME="${RUN_NAME:-hier-vq-n10-v2048}"
+MODEL="${MODEL:-hier_vq}"
 STEPS="${STEPS:-300000}"
 export OMP_NUM_THREADS=4
 OVERRIDES=(run_name="$RUN_NAME" model="$MODEL" train.steps="$STEPS" train.batch_size="${BATCH:-256}"
