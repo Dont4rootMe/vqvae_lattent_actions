@@ -172,3 +172,34 @@ def test_vqema_restart_never_writes_one_sample_into_many_codes():
     for _ in range(5):
         q(torch.randn(1, 8, 2) * 5)                    # 8 samples, so at most 8 codes may be revived per step
     assert len({tuple(row.tolist()) for row in q.codebook}) > 40
+
+
+def test_vqema_cosine_matching_is_immune_to_latent_scale():
+    """Measured at 10 tokens: between steps 25k and 40k the code norm grew from 1.0 to 9.3, the EMA codebook
+    could not follow, and three quarters of the codes fell out of use. Comparing directions removes magnitude
+    from the comparison, so the same input lands on the same code however large it grows."""
+    torch.manual_seed(0)
+    q = VQEMA(vocab_size=32, code_dim=4, decay=0.9, cosine=True, seed_samples_per_code=1)
+    directions = torch.nn.functional.normalize(torch.randn(32, 4), dim=-1)
+
+    def batch(scale):
+        idx = torch.randint(0, 32, (64,))
+        return ((directions[idx] + torch.randn(64, 4) * 0.02) * scale).view(4, 16, 4)
+
+    q.train()
+    for _ in range(30):
+        q(batch(1.0))
+    q.eval()
+    sample = batch(1.0)
+    assert torch.equal(q(sample).indices, q(sample * 20.0).indices)     # scale changes nothing
+    norms = q.codebook.norm(dim=1)
+    assert float(norms.max()) < 1.001 and float(norms.min()) > 0.999    # the codebook stays on the unit sphere
+    torch.testing.assert_close(q.bound(sample), torch.nn.functional.normalize(sample, dim=-1))
+
+
+def test_vqema_defaults_to_euclidean_matching():
+    """The queued production run trains on the euclidean path, so the default must not move under it."""
+    q = VQEMA(vocab_size=8, code_dim=3)
+    assert q.cosine is False
+    z = torch.randn(2, 5, 3)
+    torch.testing.assert_close(q.bound(z), z)
