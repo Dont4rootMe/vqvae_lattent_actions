@@ -23,6 +23,7 @@
 | `lerobot-research-r09-qwarm` | IB tmux, GPU 0 | то же, 6000 шагов, но `train.quantizer_warmup_steps=2000` | `$BASE/runs/hier_qwarm` | exit=0; eval RMSE 0.15837, 2031 код из 2048, перплексия 72 — вырождения нет |
 | `lerobot-research-r09-cont` | IB tmux, GPU 1 | 3000 шагов вообще без квантователя (`quantizer_warmup_steps=999999`) | `$BASE/runs/hier_continuous` | exit=0; train recon MSE 0.0119 (RMSE 0.109). Eval 0.93 бессмысленен: он квантовал модель, которая этому не обучалась |
 | `lerobot-research-r09-warm10k` | IB tmux, GPU 7 | проверка боевого значения прогрева: 40 000 шагов, `quantizer_warmup_steps=10000` | `$BASE/runs/hier_warm10k` | идёт |
+| `lerobot-research-r09-hier` | bot `8gpu`, task 9791 | боевой запуск: 300 000 шагов, 8×H100, batch 256 на процесс (2048 суммарно), прогрев квантователя 10 000 | `$BASE/runs/r09_hier` | в очереди, `--team-wait`: класс 8gpu занят командой 2/2 |
 
 ## Диагностика первых прогонов (2026-09-12)
 
