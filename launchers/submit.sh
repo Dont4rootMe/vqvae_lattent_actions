@@ -18,8 +18,10 @@ for var in EVAL_EVERY CKPT_EVERY BATCH; do
   [ -n "$value" ] && ENVS="$ENVS $var=$value"
 done
 [ -n "$NTOK" ] && ENVS="$ENVS NTOK=$NTOK"
-[ -n "$LEVELS" ] && ENVS="$ENVS LEVELS=$LEVELS"
-[ -n "$EXTRA" ] && ENVS="$ENVS EXTRA=$EXTRA"      # hydra overrides, ';'-separated; train.sh splits them"
+[ -n "$LEVELS" ] && ENVS="$ENVS LEVELS='$LEVELS'"
+# Hydra overrides are ';'-separated. The value reaches the queue as part of a command string that a shell parses,
+# so an unquoted ';' ends the command there and the overrides never reach training.
+[ -n "$EXTRA" ] && ENVS="$ENVS EXTRA='$EXTRA'"
 CMD="cd $DIR && env $ENVS bash --noprofile --norc $DIR/train.sh"
 echo "[submit] lerobot-research-${TAG}-hier: $CMD"
 # the team 8gpu quota is often fully used, so wait for a team slot instead of being refused outright
