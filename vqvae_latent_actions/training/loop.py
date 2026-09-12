@@ -41,6 +41,7 @@ class TrainConfig:
     ckpt_every: int = 5_000
     eval_batch_size: int = 1024
     mixed_precision: str = "bf16"
+    quantizer_warmup_steps: int = 0   # train the plain autoencoder first, then switch the quantizer on
     comet: dict[str, Any] = field(default_factory=dict)
     run_name: str = "hier"
 
@@ -154,8 +155,9 @@ def train(cfg: TrainConfig) -> dict:
             batch = next(iterator)
         actions, mask, _ = batch_to_inputs(batch)
         actions, mask = actions.to(device, non_blocking=True), mask.to(device, non_blocking=True)
+        quantize = step >= cfg.quantizer_warmup_steps
         with accelerator.autocast():
-            output = model(actions, mask)
+            output = model(actions, mask, quantize=quantize)
         accelerator.backward(output["loss"])
         if cfg.grad_clip:
             accelerator.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -168,7 +170,8 @@ def train(cfg: TrainConfig) -> dict:
         if step % cfg.log_every == 0:
             loss = accelerator.gather(output["loss"].detach().float().reshape(1)).mean().item()
             record = {"step": step, "loss": loss, "recon_mse": float(output["recon_mse"]),
-                      "aux_loss": float(output["aux_loss"]), "lr": scheduler.get_last_lr()[0],
+                      "aux_loss": float(output["aux_loss"]), "quantized": int(quantize),
+                      "lr": scheduler.get_last_lr()[0],
                       "chunks_seen": seen, "steps_per_s": cfg.log_every / max(time.time() - last_log, 1e-9),
                       "elapsed_s": time.time() - start_time}
             last_log = time.time()

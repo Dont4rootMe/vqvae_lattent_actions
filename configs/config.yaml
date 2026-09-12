@@ -25,6 +25,7 @@ train:
   ckpt_every: 5000
   eval_batch_size: 1024
   mixed_precision: bf16
+  quantizer_warmup_steps: 0      # >0 trains without the quantizer for that many steps first
 
 comet:
   mode: auto               # auto | online | offline | disabled

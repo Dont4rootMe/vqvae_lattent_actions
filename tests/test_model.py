@@ -92,6 +92,20 @@ def test_loss_backward_reaches_every_parameter(tiny_model_config, layout):
     assert missing == []
 
 
+def test_forward_can_skip_quantisation(tiny_model_config, layout):
+    """The warmup phase trains the plain autoencoder, so the reconstruction must come from raw latents."""
+    torch.manual_seed(0)
+    model = HierActionTokenizer(tiny_model_config).eval()
+    mask = _mask(layout, 2, 10, ["left_arm.joints", "head.joints"])
+    actions = torch.randn(2, 10, layout.total_dim) * mask
+    quantised = model(actions, mask)
+    plain = model(actions, mask, quantize=False)
+    assert float(plain["aux_loss"]) == 0.0
+    assert not torch.allclose(quantised["recon"], plain["recon"])
+    torch.testing.assert_close(plain["recon"], model.decode_latents(plain["latents"], mask))
+    assert torch.count_nonzero(plain["recon"][~mask]) == 0
+
+
 def test_group_weights_change_the_loss(tiny_model_config, layout):
     cfg = HierTokenizerConfig.from_dict({**tiny_model_config.to_dict(), "group_weights": {"left_arm.gripper": 10.0}})
     torch.manual_seed(0)

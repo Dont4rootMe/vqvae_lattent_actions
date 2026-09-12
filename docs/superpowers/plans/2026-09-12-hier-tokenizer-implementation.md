@@ -945,6 +945,20 @@ def test_loss_backward_reaches_every_parameter(tiny_model_config, layout):
     assert missing == []
 
 
+def test_forward_can_skip_quantisation(tiny_model_config, layout):
+    """The warmup phase trains the plain autoencoder, so the reconstruction must come from raw latents."""
+    torch.manual_seed(0)
+    model = HierActionTokenizer(tiny_model_config).eval()
+    mask = _mask(layout, 2, 10, ["left_arm.joints", "head.joints"])
+    actions = torch.randn(2, 10, layout.total_dim) * mask
+    quantised = model(actions, mask)
+    plain = model(actions, mask, quantize=False)
+    assert float(plain["aux_loss"]) == 0.0
+    assert not torch.allclose(quantised["recon"], plain["recon"])
+    torch.testing.assert_close(plain["recon"], model.decode_latents(plain["latents"], mask))
+    assert torch.count_nonzero(plain["recon"][~mask]) == 0
+
+
 def test_group_weights_change_the_loss(tiny_model_config, layout):
     cfg = HierTokenizerConfig.from_dict({**tiny_model_config.to_dict(), "group_weights": {"left_arm.gripper": 10.0}})
     torch.manual_seed(0)
@@ -1280,15 +1294,19 @@ class HierActionTokenizer(nn.Module):
         return out * mask.to(out.dtype)
 
     # ------------------------------------------------------------------ full passes
-    def forward(self, actions: Tensor, mask: Tensor) -> dict[str, Tensor]:
+    def forward(self, actions: Tensor, mask: Tensor, quantize: bool = True) -> dict[str, Tensor]:
+        """`quantize=False` trains the plain autoencoder: useful as a warmup so the latents become informative
+        before the grid is imposed on them."""
         latents = self.encode_continuous(actions, mask)
         quantized = self.quantize(latents)
-        recon = self.decode_latents(quantized.codes, mask)
+        codes = quantized.codes if quantize else latents
+        recon = self.decode_latents(codes, mask)
         target = actions.masked_fill(~mask, 0.0).to(recon.dtype)
         weights = mask.to(recon.dtype) * self.dim_weights.view(1, 1, -1).to(recon.dtype)
         recon_mse = (((recon - target) ** 2) * weights).sum() / weights.sum().clamp_min(1.0)
-        loss = recon_mse + quantized.aux_loss.to(recon_mse.dtype)
-        return {"loss": loss, "recon_mse": recon_mse.detach(), "aux_loss": quantized.aux_loss.detach(),
+        loss = recon_mse + (quantized.aux_loss.to(recon_mse.dtype) if quantize else recon_mse.new_zeros(()))
+        reported_aux = quantized.aux_loss.detach() if quantize else recon_mse.new_zeros(())
+        return {"loss": loss, "recon_mse": recon_mse.detach(), "aux_loss": reported_aux,
                 "indices": quantized.indices, "recon": recon, "latents": latents}
 
     @torch.no_grad()
@@ -2110,6 +2128,7 @@ class TrainConfig:
     ckpt_every: int = 5_000
     eval_batch_size: int = 1024
     mixed_precision: str = "bf16"
+    quantizer_warmup_steps: int = 0   # train the plain autoencoder first, then switch the quantizer on
     comet: dict[str, Any] = field(default_factory=dict)
     run_name: str = "hier"
 
@@ -2223,8 +2242,9 @@ def train(cfg: TrainConfig) -> dict:
             batch = next(iterator)
         actions, mask, _ = batch_to_inputs(batch)
         actions, mask = actions.to(device, non_blocking=True), mask.to(device, non_blocking=True)
+        quantize = step >= cfg.quantizer_warmup_steps
         with accelerator.autocast():
-            output = model(actions, mask)
+            output = model(actions, mask, quantize=quantize)
         accelerator.backward(output["loss"])
         if cfg.grad_clip:
             accelerator.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -2237,7 +2257,8 @@ def train(cfg: TrainConfig) -> dict:
         if step % cfg.log_every == 0:
             loss = accelerator.gather(output["loss"].detach().float().reshape(1)).mean().item()
             record = {"step": step, "loss": loss, "recon_mse": float(output["recon_mse"]),
-                      "aux_loss": float(output["aux_loss"]), "lr": scheduler.get_last_lr()[0],
+                      "aux_loss": float(output["aux_loss"]), "quantized": int(quantize),
+                      "lr": scheduler.get_last_lr()[0],
                       "chunks_seen": seen, "steps_per_s": cfg.log_every / max(time.time() - last_log, 1e-9),
                       "elapsed_s": time.time() - start_time}
             last_log = time.time()
@@ -2423,6 +2444,7 @@ train:
   ckpt_every: 5000
   eval_batch_size: 1024
   mixed_precision: bf16
+  quantizer_warmup_steps: 0      # >0 trains without the quantizer for that many steps first
 
 comet:
   mode: auto               # auto | online | offline | disabled

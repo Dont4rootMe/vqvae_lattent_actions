@@ -212,15 +212,19 @@ class HierActionTokenizer(nn.Module):
         return out * mask.to(out.dtype)
 
     # ------------------------------------------------------------------ full passes
-    def forward(self, actions: Tensor, mask: Tensor) -> dict[str, Tensor]:
+    def forward(self, actions: Tensor, mask: Tensor, quantize: bool = True) -> dict[str, Tensor]:
+        """`quantize=False` trains the plain autoencoder: useful as a warmup so the latents become informative
+        before the grid is imposed on them."""
         latents = self.encode_continuous(actions, mask)
         quantized = self.quantize(latents)
-        recon = self.decode_latents(quantized.codes, mask)
+        codes = quantized.codes if quantize else latents
+        recon = self.decode_latents(codes, mask)
         target = actions.masked_fill(~mask, 0.0).to(recon.dtype)
         weights = mask.to(recon.dtype) * self.dim_weights.view(1, 1, -1).to(recon.dtype)
         recon_mse = (((recon - target) ** 2) * weights).sum() / weights.sum().clamp_min(1.0)
-        loss = recon_mse + quantized.aux_loss.to(recon_mse.dtype)
-        return {"loss": loss, "recon_mse": recon_mse.detach(), "aux_loss": quantized.aux_loss.detach(),
+        loss = recon_mse + (quantized.aux_loss.to(recon_mse.dtype) if quantize else recon_mse.new_zeros(()))
+        reported_aux = quantized.aux_loss.detach() if quantize else recon_mse.new_zeros(())
+        return {"loss": loss, "recon_mse": recon_mse.detach(), "aux_loss": reported_aux,
                 "indices": quantized.indices, "recon": recon, "latents": latents}
 
     @torch.no_grad()
