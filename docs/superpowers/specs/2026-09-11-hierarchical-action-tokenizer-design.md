@@ -88,7 +88,12 @@
   (`Accelerator(step_scheduler_with_optimizer=False)`, см. ошибку в r07b).
 * Оценка на eval-наборе каждые 10k шагов, чекпоинт каждые 5k с resume из `checkpoints/latest.pt`, финальный экспорт
   (`config.json` + веса) и `final_eval.json/md`.
-* Логи: tensorboard + `train_log.jsonl`; ClearML убирается (на кластере не используется).
+* Трекинг (решение пользователя 2026-09-12): Comet ML вместо tensorboard, workspace `dont4rootme`, проект
+  `hier-action-tokenizer`, режим `auto` (онлайн, если API доступен, иначе офлайн-архив и последующая заливка
+  `launchers/comet_upload.sh`). Метрики дублируются в `train_log.jsonl` и `eval_log.jsonl` в каталоге запуска.
+  Ключ не хранится в репозитории: `COMET_API_KEY`/`COMET_CONFIG` (`~/.comet.config` локально,
+  `/mnt/.../afedorov/.comet.config` на кластере); `comet_ml` на кластере лежит в `$BASE/pylib_comet`.
+  ClearML убирается.
 * Первая серия: T=10, N=10, V=2048 (110 бит, прямое сравнение с ActionCodec 0.081); затем N ∈ {5,10,16},
   V ∈ {1024,2048}; d=256, K_free=4, L₁=2, L₂=4, L₃=4. Для FSQ d_z = число уровней (4 при [8,8,8,4]) и задаётся
   ими; для VQ-EMA d_z — параметр конфига (по умолчанию 64).
