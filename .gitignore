@@ -1,16 +1,21 @@
 __pycache__
 *.pyc
 *.pyo
-*.pyd
-*.pyw
-*.pyz
-*.pywz
+.pytest_cache/
+.ruff_cache/
 
 outputs/
+runs/
 wandb/
+.cometml-runs/
+comet_offline/
+*.zip
+
+# credentials must never be committed
+.comet.config
+*.api_key
+COMET_API_KEY
+
 .DS_Store
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*

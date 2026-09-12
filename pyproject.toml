@@ -4,27 +4,31 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vqvae-latent-actions"
-version = "0.1.0"
-description = "Training pipeline for FSQ-based VQ-VAE models for robotic action tokenization"
+version = "0.2.0"
+description = "Hierarchical discrete tokenizer for VLA action chunks in the unified action space"
 authors = [{name = "SberRobotics"}]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "torch",
-  "hydra-core",
+  "torch>=2.4",
+  "numpy",
+  "pyyaml",
   "accelerate",
-  "clearml",
+  "hydra-core",
   "omegaconf",
-  "matplotlib",
 ]
 
 [project.optional-dependencies]
-dev = ["black", "ruff"]
+tracking = ["comet_ml"]
+lfq = ["vector-quantize-pytorch"]
+dev = ["pytest", "ruff"]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-packages = ["vqvae_latent_actions", "vqvae_latent_actions.models", "vqvae_latent_actions.training", "vqvae_latent_actions.utils"]
+[tool.setuptools.packages.find]
+include = ["vqvae_latent_actions*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.ruff]
-line-length = 100
-
+line-length = 120

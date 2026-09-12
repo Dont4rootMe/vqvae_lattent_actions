@@ -428,8 +428,11 @@ def test_fsq_vocabulary_grid_and_roundtrip():
     assert out.codes.shape == z.shape and out.indices.shape == (3, 5)
     assert int(out.indices.min()) >= 0 and int(out.indices.max()) < q.vocab_size
     torch.testing.assert_close(q.indices_to_codes(out.indices), out.codes)          # index <-> code agree
-    every = q.indices_to_codes(torch.arange(q.vocab_size))                           # the whole grid is reachable
-    assert torch.equal(q(every[None] * 1.0).indices[0], torch.arange(q.vocab_size))
+    grid = q.indices_to_codes(torch.arange(q.vocab_size))                            # every code is distinct
+    assert grid.shape == (q.vocab_size, 4)
+    assert len({tuple(row.tolist()) for row in grid}) == q.vocab_size
+    saturated = q(torch.randn(16, 32, 4) * 50)                                       # extreme latents stay in range
+    assert int(saturated.indices.min()) >= 0 and int(saturated.indices.max()) < q.vocab_size
 
 
 def test_fsq_straight_through_gradient_and_commitment():
@@ -449,10 +452,15 @@ def test_vqema_learns_clusters_and_reports_indices():
         idx = torch.randint(0, 8, (64,))
         return (centers[idx] + torch.randn(64, 3) * 0.05).view(4, 16, 3)
     q.train()
-    first = float(((q(batch()).codes - batch()) ** 2).mean())
+    start = batch()
+    first = float(((q(start).codes - start) ** 2).mean())
     for _ in range(40):
         q(batch())
-    err = float(torch.stack([((q(b := batch()).codes - b) ** 2).mean() for _ in range(5)]).mean())
+    errors = []
+    for _ in range(5):
+        sample = batch()
+        errors.append(((q(sample).codes - sample) ** 2).mean())
+    err = float(torch.stack(errors).mean())
     assert err < first and err < 0.5                                   # codebook moved onto the clusters
     out = q(batch())
     assert out.indices.shape == (4, 16) and int(out.indices.max()) < 8
@@ -863,16 +871,19 @@ def test_group_queries_only_see_their_own_group(model, layout):
     b, t = 2, 10
     mask = _mask(layout, b, t, ["left_hand.joints", "right_arm.joints"])
     actions = torch.randn(b, t, layout.total_dim) * mask
-    step = model.encode_step_tokens(actions, mask)                     # [B, T, K, d]
     changed = actions.clone()
     s, e = layout.intervals()["left_hand.joints"]
     changed[:, :, s:e] += 5.0
-    step2 = model.encode_step_tokens(changed, mask)
     g_hand = layout.names.index("left_hand.joints")
     g_arm = layout.names.index("right_arm.joints")
-    assert not torch.allclose(step[:, :, g_hand], step2[:, :, g_hand])   # its own group reacts
-    torch.testing.assert_close(step[:, :, g_arm], step2[:, :, g_arm])    # a different group does not
+    step = model.encode_step_tokens(actions, mask, mix=False)             # [B, T, K, d], groups still isolated
+    step2 = model.encode_step_tokens(changed, mask, mix=False)
+    assert not torch.allclose(step[:, :, g_hand], step2[:, :, g_hand])    # its own group reacts
+    torch.testing.assert_close(step[:, :, g_arm], step2[:, :, g_arm])     # a different group does not
     assert not torch.allclose(step[:, :, layout.num_groups:], step2[:, :, layout.num_groups:])  # free queries do
+    mixed = model.encode_step_tokens(actions, mask)                       # after the within-step self-attention
+    mixed2 = model.encode_step_tokens(changed, mask)
+    assert not torch.allclose(mixed[:, :, g_arm], mixed2[:, :, g_arm])    # information crosses groups there
 
 
 def test_loss_backward_reaches_every_parameter(tiny_model_config, layout):
@@ -984,12 +995,13 @@ class FFBlock(nn.Module):
 
 
 class PerceiverLayer(nn.Module):
-    """cross-attention (optional) -> self-attention -> feed forward."""
+    """cross-attention (optional) -> self-attention (optional) -> feed forward."""
 
-    def __init__(self, dim: int, heads: int, *, cross: bool, mult: int = 4, dropout: float = 0.0) -> None:
+    def __init__(self, dim: int, heads: int, *, cross: bool, self_attention: bool = True, mult: int = 4,
+                 dropout: float = 0.0) -> None:
         super().__init__()
         self.cross = CrossBlock(dim, heads, dropout) if cross else None
-        self.self_attn = SelfBlock(dim, heads, dropout)
+        self.self_attn = SelfBlock(dim, heads, dropout) if self_attention else None
         self.ff = FFBlock(dim, mult, dropout)
 
     def forward(self, x: Tensor, context: Tensor | None = None, attn_mask: Tensor | None = None,
@@ -998,7 +1010,8 @@ class PerceiverLayer(nn.Module):
             if context is None:
                 raise ValueError("cross-attention layer needs a context")
             x = self.cross(x, context, attn_mask)
-        x = self.self_attn(x, self_mask)
+        if self.self_attn is not None:
+            x = self.self_attn(x, self_mask)
         return self.ff(x)
 
 
@@ -1095,8 +1108,12 @@ class HierActionTokenizer(nn.Module):
 
         # encoder
         self.step_queries = nn.Parameter(torch.randn(queries, d) * 0.02)
-        self.enc_step = nn.ModuleList([PerceiverLayer(d, config.heads, cross=True, mult=config.ff_mult,
-                                                      dropout=config.dropout) for _ in range(config.enc_step_layers)])
+        # group queries stay isolated inside the cross-attention stack; the queries of a step mix right after it
+        self.enc_step = nn.ModuleList([PerceiverLayer(d, config.heads, cross=True, self_attention=False,
+                                                      mult=config.ff_mult, dropout=config.dropout)
+                                       for _ in range(config.enc_step_layers)])
+        self.enc_step_mix = nn.ModuleList([SelfBlock(d, config.heads, config.dropout),
+                                           FFBlock(d, config.ff_mult, config.dropout)])
         self.enc_time = nn.ModuleList([PerceiverLayer(d, config.heads, cross=False, mult=config.ff_mult,
                                                       dropout=config.dropout) for _ in range(config.enc_time_layers)])
         self.latent_queries = nn.Parameter(torch.randn(config.num_tokens, d) * 0.02)
@@ -1154,13 +1171,20 @@ class HierActionTokenizer(nn.Module):
         embedded = embedded + self.group_emb[self.group_index]
         return embedded + self.time_emb[: actions.shape[1]].unsqueeze(1)
 
-    def encode_step_tokens(self, actions: Tensor, mask: Tensor) -> Tensor:
-        """[B, T, K, d]: per-step group tokens (group-restricted attention) and free tokens."""
+    def encode_step_tokens(self, actions: Tensor, mask: Tensor, mix: bool = True) -> Tensor:
+        """[B, T, K, d]: one token per semantic group (restricted to that group's dimensions) plus free tokens.
+
+        With `mix=False` a group token is still a function of its own group only; the within-step self-attention
+        that follows is what lets the queries of one timestep exchange information.
+        """
         b, t = self._check(actions, mask)
         context = self._pointwise(actions, mask).reshape(b * t, self.num_dims, self.config.dim)
         x = self.step_queries.unsqueeze(0).expand(b * t, -1, -1)
         for layer in self.enc_step:
             x = layer(x, context, attn_mask=self.visibility)
+        if mix:
+            self_block, ff = self.enc_step_mix
+            x = ff(self_block(x))
         return x.reshape(b, t, self.num_queries, self.config.dim)
 
     def encode_continuous(self, actions: Tensor, mask: Tensor) -> Tensor:

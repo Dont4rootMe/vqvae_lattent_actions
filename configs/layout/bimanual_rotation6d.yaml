@@ -1,0 +1,72 @@
+# Total unified state/action dimension: 119
+mode: semantic_mapping
+rotation_representation: rotation_6d
+target_image_resolution: [448, 448]
+image_keys: [base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb]
+
+groups:
+  left_arm.joints:
+    kind: vector
+    max_dim: 8
+
+  left_arm.cartesian_position:
+    kind: vector
+    dim: 3
+
+  left_arm.cartesian_rotation:
+    kind: rotation
+
+  left_arm.gripper:
+    kind: vector
+    dim: 1
+
+  left_hand.joints:
+    kind: vector
+    max_dim: 24
+
+  right_arm.joints:
+    kind: vector
+    max_dim: 8
+
+  right_arm.cartesian_position:
+    kind: vector
+    dim: 3
+
+  right_arm.cartesian_rotation:
+    kind: rotation
+
+  right_arm.gripper:
+    kind: vector
+    dim: 1
+
+  right_hand.joints:
+    kind: vector
+    max_dim: 24
+
+  head.joints:
+    kind: vector
+    max_dim: 3
+
+  torso.joints:
+    kind: vector
+    max_dim: 5
+
+  base.velocity:
+    kind: vector
+    max_dim: 6
+
+  base.wheel_phase:
+    kind: vector
+    dim: 6
+
+  left_leg.joints:
+    kind: vector
+    max_dim: 6
+
+  right_leg.joints:
+    kind: vector
+    max_dim: 6
+
+  base.wheel_joints:
+    kind: vector
+    max_dim: 3
