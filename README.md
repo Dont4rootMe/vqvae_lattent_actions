@@ -29,6 +29,20 @@ VQ-EMA, the default arm, needs none of this: its codebook follows whatever scale
 identical budget `quantizer_warmup_steps=0` used 103 of 110 bits against 95 with a warmup. The default stays at
 10,000 because it is the safe value for every arm; pass 0 for the learned codebook.
 
+**The default arm matches codes by direction.** A learned codebook compared by euclidean distance has nothing
+anchoring the scale of the code: the decoder normalizes its input, the gradient keeps growing the code norm, the
+codebook follows, and eventually most codes fall out of use. `model.quantizer.cosine` (on by default) compares
+directions instead. At 10 tokens it held through a full 40k schedule with 105 of 110 bits in use.
+
+**Long runs on preemptible slots.** `LOW_PRIORITY=1 launchers/submit.sh` queues with `--low-priority`: the job may
+be stopped and rerun with the same command. The run resumes from `out/<run>/checkpoints/latest.pt` (keep
+`CKPT_EVERY` small), trims log rows past the checkpoint, continues the same Comet experiment, and imports the code
+that `submit.sh` pinned into `runs/<tag>_hier/code` at submit time, never the shared checkout.
+
+```bash
+LOW_PRIORITY=1 TAG=r22a NTOK=20 CKPT_EVERY=2000 EXTRA="train.quantizer_warmup_steps=0" launchers/submit.sh
+```
+
 **Watch the per-position numbers, not the pooled ones.** `eval/perplexity` counts all token positions together and
 happily reports 2031 of 2048 codes while three of ten positions carry one bit each. `eval/min_position_perplexity`
 and `eval/effective_bits` are the honest measures of what the bottleneck carries.

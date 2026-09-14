@@ -10,7 +10,8 @@ quantizer:
   code_dim: 4
   commitment: 0.25
   decay: 0.99
-  # Anchors for the code scale, at most one. At 10 tokens the euclidean code grew 9x late in training and lost
-  # three quarters of the codebook (docs/runs.md, 2026-09-13).
-  cosine: false            # match directions, drop magnitude
-  squash: false            # tanh-bound the code, keep magnitude
+  # Anchors for the code scale, at most one. Euclidean matching is unstable: the code norm grows without bound
+  # (9x by step 11k in one run, from step 27k in another) and the codebook collapses. Cosine held the scale
+  # through a full 40k schedule at 10 tokens, RMSE 0.07443 against 0.0806 for ActionCodec (docs/runs.md, 2026-09-14).
+  cosine: true             # match directions, drop magnitude
+  squash: false            # tanh-bound the code, keep magnitude (not validated)

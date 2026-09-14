@@ -16,6 +16,7 @@ def test_config_tree_composes_and_matches_the_budget():
     assert payload["model"]["num_tokens"] == 10
     quantizer = payload["model"]["quantizer"]                            # the default arm is the learned codebook
     assert quantizer["type"] == "vq" and quantizer["vocab_size"] == 2048 and quantizer["code_dim"] == 4
+    assert quantizer["cosine"] is True                                   # euclidean matching runs away in scale
     assert payload["train"]["steps"] == 300000 and payload["train"]["mixed_precision"] == "bf16"
     assert payload["comet"]["project"] and payload["comet"]["workspace"] == "dont4rootme"
     assert "manifest" in payload["data"] and "eval_set" in payload["data"]
