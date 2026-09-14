@@ -86,8 +86,17 @@ def truncate_log(path: Path, step: int) -> None:
     """Keep rows up to `step`: a rerun trains every later step again and would log it twice."""
     if not path.exists():
         return
-    kept = [line for line in path.read_text().splitlines() if line.strip() and json.loads(line)["step"] <= step]
-    path.write_text("".join(line + "\n" for line in kept))
+    kept = []
+    for line in path.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:              # the job was killed in the middle of writing this line
+            continue
+        if int(row.get("step", -1)) <= step:
+            kept.append(line)
+    tmp = path.with_name(path.name + ".tmp")      # a second kill during the rewrite must not lose the log
+    tmp.write_text("".join(line + "\n" for line in kept))
+    tmp.replace(path)
 
 
 def build_model(cfg: TrainConfig, layout) -> HierActionTokenizer:

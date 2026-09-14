@@ -79,6 +79,7 @@ def test_resume_drops_log_rows_from_an_attempt_that_never_checkpointed(tmp_path,
     with log.open("a") as handle:                                       # the preempted attempt got further
         for step in (4, 5):
             handle.write(json.dumps({"step": step, "loss": 9.9}) + "\n")
+        handle.write('{"step": 6, "lo')                               # killed in the middle of a write
     train(_config(tmp_path, tiny_manifest, eval_path, steps=5))
     rows = [json.loads(line) for line in log.read_text().splitlines()]
     assert [r["step"] for r in rows] == [1, 2, 3, 4, 5]
