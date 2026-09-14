@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import torch
 
 from vqvae_latent_actions.training.loop import TrainConfig, lr_lambda, train
@@ -61,6 +62,9 @@ def test_param_groups_can_exempt_named_parameters_from_weight_decay(tiny_model_c
     default = param_groups(model, 0.01)
     assert targets <= {id(p) for p in default[0]["params"]} and default[0]["weight_decay"] == 0.01
 
+    with pytest.raises(TypeError, match="list"):
+        param_groups(model, 0.01, "from_code")                          # a bare string would match every name
+
     exempt = param_groups(model, 0.01, ["from_code", "to_code"])
     assert targets <= {id(p) for p in exempt[1]["params"]} and exempt[1]["weight_decay"] == 0.0
     trainable = [id(p) for p in model.parameters() if p.requires_grad]
@@ -96,3 +100,35 @@ def test_scale_diagnostics_report_what_drifts(tiny_model_config):
                                             "quantizer": {"type": "vq", "vocab_size": 16, "code_dim": 2}})
     vq = scale_diagnostics(HierActionTokenizer(vq_cfg), latents)
     assert "codebook_norm" in vq and vq["code_norm"] > 0
+
+
+
+def test_rerun_without_a_checkpoint_starts_the_logs_over(tmp_path, tiny_manifest, tiny_eval_set):
+    """Stopped before its first checkpoint, the rerun trains from step 0 again: every old row is stale, and the first
+    new row must not be glued onto a line the kill cut short."""
+    from vqvae_latent_actions.data.chunks import save_eval_set
+    eval_path = tmp_path / "eval.npz"
+    save_eval_set(tiny_eval_set, eval_path)
+    run = tmp_path / "run"
+    run.mkdir(parents=True)
+    log = run / "train_log.jsonl"
+    log.write_text('{"step": 1, "loss": 9.9}\n{"step": 2, "loss": 9.9}\n{"step": 3, "lo')
+    train(_config(tmp_path, tiny_manifest, eval_path, steps=2))
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [r["step"] for r in rows] == [1, 2] and all(r["loss"] != 9.9 for r in rows)
+
+
+def test_rerun_of_a_finished_run_evaluates_the_last_step_once_and_keeps_counting_data(tmp_path, tiny_manifest,
+                                                                                      tiny_eval_set):
+    from vqvae_latent_actions.data.chunks import save_eval_set
+    eval_path = tmp_path / "eval.npz"
+    save_eval_set(tiny_eval_set, eval_path)
+    cfg = _config(tmp_path, tiny_manifest, eval_path, steps=3)
+    train(cfg)
+    train(cfg)                                                        # killed during export, rerun as is
+    run = tmp_path / "run"
+    evals = [json.loads(line)["step"] for line in (run / "eval_log.jsonl").read_text().splitlines()]
+    assert evals.count(3) == 1
+    train(_config(tmp_path, tiny_manifest, eval_path, steps=5))       # resumed at 3: data seen keeps growing
+    rows = {r["step"]: r for r in map(json.loads, (run / "train_log.jsonl").read_text().splitlines())}
+    assert rows[4]["chunks_seen"] == 4 * cfg.batch_size and rows[5]["chunks_seen"] == 5 * cfg.batch_size

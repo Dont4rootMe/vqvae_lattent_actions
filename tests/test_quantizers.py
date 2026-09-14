@@ -219,3 +219,22 @@ def test_vqema_squash_bounds_the_code_but_keeps_its_magnitude():
     assert float(q.bound(small).norm()) < float(q.bound(large).norm())
     with pytest.raises(ValueError, match="pick one"):
         VQEMA(vocab_size=8, code_dim=3, cosine=True, squash=True)
+
+
+
+@pytest.mark.parametrize("anchor", [{}, {"cosine": True}])
+def test_vqema_matching_is_exact_under_bf16_autocast(anchor):
+    """Training runs under bf16 autocast, and autocast casts the matching matmul to bfloat16 even after .float().
+    bfloat16 keeps 7 mantissa bits; with cosine every similarity sits near 1, so the nearest code is often picked
+    wrong. Evaluation runs in fp32, so training and evaluation would not even agree."""
+    torch.manual_seed(0)
+    q = VQEMA(vocab_size=512, code_dim=4, seed_samples_per_code=1, **anchor)
+    q.train()
+    for _ in range(3):
+        q(torch.randn(8, 64, 4))
+    q.eval()
+    z = torch.randn(32, 64, 4)
+    exact = q(z).indices
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        mixed = q(z).indices
+    assert torch.equal(exact, mixed)

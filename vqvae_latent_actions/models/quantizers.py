@@ -222,7 +222,14 @@ class VQEMA(Quantizer):
         return self._anchor(z.float())
 
     def forward(self, z: Tensor) -> QuantizerOutput:
-        z = self._anchor(z.float())
+        # Autocast would run the matching matmul in bfloat16 even after .float(): 7 mantissa bits, so the nearest
+        # code is often picked wrong (with cosine every similarity is close to 1), and fp32 evaluation would
+        # disagree with training. The whole codebook step runs in fp32.
+        with torch.autocast(device_type=z.device.type, enabled=False):
+            return self._quantize(z.float())
+
+    def _quantize(self, z: Tensor) -> QuantizerOutput:
+        z = self._anchor(z)
         flat = z.reshape(-1, self.code_dim)
         if self.training and not bool(self.initialized):
             collected = self._collect(flat.detach())

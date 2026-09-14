@@ -61,6 +61,8 @@ def lr_lambda(cfg: TrainConfig):
 
 def param_groups(model: torch.nn.Module, weight_decay: float, no_decay_keywords=()) -> list[dict]:
     """AdamW groups: decay for matrices, none for 1-d parameters or names matching a keyword."""
+    if isinstance(no_decay_keywords, str):   # iterating a string matches single letters, i.e. every parameter
+        raise TypeError(f"no_decay_keywords must be a list of names, got the string {no_decay_keywords!r}")
     decay, no_decay = [], []
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
@@ -127,7 +129,7 @@ def train(cfg: TrainConfig) -> dict:
                                   lr=cfg.lr, betas=tuple(cfg.betas))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda(cfg))
 
-    step = 0
+    step, resumed_seen, resumed_elapsed = 0, 0, 0.0
     latest = out / "checkpoints" / "latest.pt"
     if latest.exists():
         payload = torch.load(latest, map_location="cpu", weights_only=False)
@@ -135,10 +137,14 @@ def train(cfg: TrainConfig) -> dict:
         optimizer.load_state_dict(payload["optimizer"])
         scheduler.load_state_dict(payload["scheduler"])
         step = int(payload["step"])
+        resumed_seen = int(payload.get("chunks_seen", step * cfg.batch_size * world))
+        resumed_elapsed = float(payload.get("elapsed_s", 0.0))
         accelerator.print(f"resumed from {latest} at step {step}")
-        if accelerator.is_main_process:          # a preempted attempt may have logged past its last checkpoint
-            for log_path in (out / "train_log.jsonl", out / "eval_log.jsonl"):
-                truncate_log(log_path, step)
+    if accelerator.is_main_process:
+        # Every start trims: a rerun trains again everything after its checkpoint, or everything when there is none.
+        # A run that already reached the last step evaluates it again, so that row goes too.
+        truncate_log(out / "train_log.jsonl", step)
+        truncate_log(out / "eval_log.jsonl", step - 1 if step >= cfg.steps else step)
 
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
 
@@ -188,7 +194,8 @@ def train(cfg: TrainConfig) -> dict:
             return
         directory = out / "checkpoints"
         directory.mkdir(parents=True, exist_ok=True)
-        payload = {"step": step, "model": accelerator.unwrap_model(model).state_dict(),
+        payload = {"step": step, "chunks_seen": seen, "elapsed_s": resumed_elapsed + time.time() - start_time,
+                   "model": accelerator.unwrap_model(model).state_dict(),
                    "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "config": asdict(cfg)}
         tmp = directory / "latest.tmp"
         torch.save(payload, tmp)
@@ -196,7 +203,7 @@ def train(cfg: TrainConfig) -> dict:
 
     model.train()
     start_time = last_log = time.time()
-    seen = 0
+    seen = resumed_seen
     last_summary: dict = {}
     iterator = iter(loader)
     while step < cfg.steps:
@@ -231,7 +238,7 @@ def train(cfg: TrainConfig) -> dict:
                       **scale_diagnostics(accelerator.unwrap_model(model), latents),
                       "lr": scheduler.get_last_lr()[0],
                       "chunks_seen": seen, "steps_per_s": cfg.log_every / max(time.time() - last_log, 1e-9),
-                      "elapsed_s": time.time() - start_time}
+                      "elapsed_s": resumed_elapsed + time.time() - start_time}
             last_log = time.time()
             if accelerator.is_main_process:
                 logger.log_metrics(record, step=step)

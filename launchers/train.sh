@@ -10,10 +10,15 @@ OVERRIDES=(run_name="$RUN_NAME" model="$MODEL" train.steps="$STEPS" train.batch_
            train.num_workers="${WORKERS:-10}" train.eval_every="${EVAL_EVERY:-10000}" train.ckpt_every="${CKPT_EVERY:-5000}")
 [ -n "$NTOK" ] && OVERRIDES+=(model.num_tokens="$NTOK")
 [ -n "$LEVELS" ] && OVERRIDES+=(model.quantizer.levels="$LEVELS")
-# split on ';' only: an unquoted expansion would also glob, and a list override like [from_code,to_code] is a glob
+# split on ';' only: an unquoted expansion would also glob, and a list override like [from_code,to_code] is a glob.
+# Spaces around a ';' and empty fields are dropped, since hydra rejects an override that starts with a space.
 if [ -n "$EXTRA" ]; then
-  IFS=';' read -r -a EXTRA_OVERRIDES <<< "$EXTRA"
-  OVERRIDES+=("${EXTRA_OVERRIDES[@]}")
+  IFS=';' read -r -a EXTRA_PARTS <<< "$EXTRA"
+  for part in "${EXTRA_PARTS[@]}"; do
+    part="${part#"${part%%[![:space:]]*}"}"
+    part="${part%"${part##*[![:space:]]}"}"
+    [ -n "$part" ] && OVERRIDES+=("$part")
+  done
 fi
 echo "[launch] ${OVERRIDES[*]}"
 nvidia-smi --query-gpu=index,name,memory.used --format=csv,noheader || true
