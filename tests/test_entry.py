@@ -54,15 +54,20 @@ def test_every_shipped_model_config_builds_its_quantizer(name):
     assert quantizer.code_dim > 0 and quantizer.out_dim > 0
 
 
-@pytest.mark.parametrize("override", ["model.quantizer.cosine=true", "model.quantizer.squash=true"])
-def test_scale_anchor_overrides_compose_and_build(override):
+@pytest.mark.parametrize("overrides, cosine, squash", [
+    (["model.quantizer.cosine=true"], True, False),
+    (["model.quantizer.cosine=false"], False, False),
+    # squash replaces the default cosine anchor, so it has to switch cosine off: the two together are refused
+    (["model.quantizer.cosine=false", "model.quantizer.squash=true"], False, True),
+])
+def test_scale_anchor_overrides_compose_and_build(overrides, cosine, squash):
     """The first cosine check died at composition: `cosine` was not a key of the config, so Hydra refused the
     override before training started."""
     from vqvae_latent_actions.models.quantizers import build_quantizer
     with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base=None):
-        cfg = compose(config_name="config", overrides=["run_name=unit", "model=hier_vq", override])
+        cfg = compose(config_name="config", overrides=["run_name=unit", "model=hier_vq", *overrides])
     quantizer = build_quantizer(OmegaConf.to_container(cfg.model.quantizer, resolve=True))
-    assert getattr(quantizer, override.split(".")[-1].split("=")[0]) is True
+    assert (quantizer.cosine, quantizer.squash) == (cosine, squash)
 
 
 def test_weight_decay_exemptions_compose():
