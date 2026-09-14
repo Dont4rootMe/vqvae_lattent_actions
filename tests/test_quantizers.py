@@ -203,3 +203,19 @@ def test_vqema_defaults_to_euclidean_matching():
     assert q.cosine is False
     z = torch.randn(2, 5, 3)
     torch.testing.assert_close(q.bound(z), z)
+
+
+def test_vqema_squash_bounds_the_code_but_keeps_its_magnitude():
+    """The other way to anchor the code scale: tanh keeps every code inside (-1, 1), so the scale cannot run
+    away, yet, unlike the cosine path, a small code and a large code in the same direction stay different."""
+    torch.manual_seed(0)
+    q = VQEMA(vocab_size=16, code_dim=3, squash=True, seed_samples_per_code=1)
+    q.train()
+    for scale in (1.0, 10.0, 100.0):
+        out = q(torch.randn(4, 8, 3) * scale)
+        assert float(out.codes.detach().abs().max()) <= 1.0 + 1e-3
+    assert float(q.codebook.abs().max()) <= 1.0 + 1e-3
+    small, large = torch.full((1, 1, 3), 0.1), torch.full((1, 1, 3), 0.9)
+    assert float(q.bound(small).norm()) < float(q.bound(large).norm())
+    with pytest.raises(ValueError, match="pick one"):
+        VQEMA(vocab_size=8, code_dim=3, cosine=True, squash=True)

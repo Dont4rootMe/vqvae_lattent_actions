@@ -23,6 +23,14 @@ done
 # so an unquoted ';' ends the command there and the overrides never reach training.
 [ -n "$EXTRA" ] && ENVS="$ENVS EXTRA='$EXTRA'"
 CMD="cd $DIR && env $ENVS bash --noprofile --norc $DIR/train.sh"
-echo "[submit] lerobot-research-${TAG}-hier: $CMD"
-# the team 8gpu quota is often fully used, so wait for a team slot instead of being refused outright
-bot submit -t "$CLASS" -H 48 -n "lerobot-research-${TAG}-hier" -c "$CMD" ${QUEUE_FLAGS:---team-wait} --json | tee "$DIR/submit.json"
+if [ -n "$LOW_PRIORITY" ]; then
+  # Preemptible: the queue may stop the job and rerun this same command. The trainer then resumes from
+  # out/<run>/checkpoints/latest.pt, so keep CKPT_EVERY small. The queue forbids combining this with --team-wait.
+  QUEUE_FLAGS="--low-priority"
+fi
+case "${QUEUE_FLAGS:-}" in
+  *--low-priority*--team-wait*|*--team-wait*--low-priority*) echo "[submit] --low-priority and --team-wait exclude each other"; exit 2;;
+esac
+echo "[submit] lerobot-research-${TAG}-hier (${QUEUE_FLAGS:---team-wait}): $CMD"
+# normal jobs wait for a team slot instead of being refused when the team quota is full
+bot submit -t "$CLASS" -H "${HOURS:-48}" -n "lerobot-research-${TAG}-hier" -c "$CMD" ${QUEUE_FLAGS:---team-wait} --json | tee "$DIR/submit.json"

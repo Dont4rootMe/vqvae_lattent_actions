@@ -28,6 +28,7 @@ train:
   # The quantizer must not be switched on from step 0: it collapses to a single code and the encoder follows it
   # into a constant. Training the plain autoencoder first fixes this (see docs/runs.md, 2026-09-12).
   quantizer_warmup_steps: 10000
+  no_decay_keywords: []    # e.g. [from_code, to_code]: exempt the code projections from weight decay
 
 comet:
   mode: auto               # auto | online | offline | disabled

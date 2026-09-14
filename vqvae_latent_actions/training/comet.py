@@ -17,7 +17,7 @@ class RunLogger:
                  experiment_name: str | None = None, tags: list[str] | None = None,
                  offline_directory: str | Path | None = None, jsonl_path: str | Path | None = None,
                  eval_jsonl_path: str | Path | None = None, config: Mapping[str, Any] | None = None,
-                 enabled: bool = True) -> None:
+                 enabled: bool = True, resume_key_path: str | Path | None = None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         # training steps and evaluations go to different files: one row per step, no mixed schemas
@@ -39,9 +39,17 @@ class RunLogger:
             resolved = "online" if self._reachable() else "offline"
         kwargs = dict(project_name=project, auto_metric_logging=False, auto_param_logging=False,
                       auto_output_logging="simple", log_code=False, log_graph=False, log_env_details=True)
+        key_path = Path(resume_key_path) if resume_key_path else None
+        resumed = False
         try:
             if resolved == "online":
-                self.experiment = comet_ml.Experiment(workspace=workspace, **kwargs)
+                # a job that the queue stopped and reran continues the experiment it started, not a new one
+                previous = key_path.read_text().strip() if key_path and key_path.exists() else ""
+                if previous:
+                    self.experiment = self._resume(comet_ml, previous, workspace, kwargs)
+                    resumed = self.experiment is not None
+                if self.experiment is None:
+                    self.experiment = comet_ml.Experiment(workspace=workspace, **kwargs)
             else:
                 directory = Path(offline_directory or "comet_offline")
                 directory.mkdir(parents=True, exist_ok=True)
@@ -50,13 +58,33 @@ class RunLogger:
         except Exception as exc:                                    # pragma: no cover - network/credentials
             print(f"[comet] could not start a {resolved} experiment ({type(exc).__name__}: {exc}); jsonl only", flush=True)
             return
-        if experiment_name:
+        if key_path and resolved == "online" and not resumed:
+            try:
+                key_path.parent.mkdir(parents=True, exist_ok=True)
+                key_path.write_text(str(self.experiment.get_key()))
+            except Exception as exc:                                # pragma: no cover - filesystem
+                print(f"[comet] could not store the experiment key ({type(exc).__name__}: {exc})", flush=True)
+        if experiment_name and not resumed:
             self.experiment.set_name(experiment_name)
-        if tags:
+        if tags and not resumed:
             self.experiment.add_tags(list(tags))
         if config:
             self.experiment.log_parameters(_flatten(config))
-        print(f"[comet] mode={self._mode} project={project} workspace={workspace}", flush=True)
+        print(f"[comet] mode={self._mode} project={project} workspace={workspace}"
+              f"{' (continued ' + str(self.experiment.get_key()) + ')' if resumed else ''}", flush=True)
+
+    @staticmethod
+    def _resume(comet_ml, key: str, workspace: str | None, kwargs: dict):
+        for argument in ("experiment_key", "previous_experiment"):   # the keyword changed across comet_ml versions
+            try:
+                return comet_ml.ExistingExperiment(workspace=workspace, **{argument: key}, **kwargs)
+            except TypeError:
+                continue
+            except Exception as exc:                                # pragma: no cover - network/credentials
+                print(f"[comet] could not continue experiment {key} ({type(exc).__name__}: {exc}); starting a new one",
+                      flush=True)
+                return None
+        return None
 
     @staticmethod
     def _reachable(url: str = "https://www.comet.com", timeout: float = 5.0) -> bool:

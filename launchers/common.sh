@@ -3,6 +3,8 @@ BASE=/mnt/virtual_ai0001071-01239_SR006-nfs2/afedorov/projects/action_tokenizati
 REPO=${REPO:-$BASE/vqvae_lattent_actions}
 ACTION_CHUNKS=$BASE/action_chunks
 RUN_DIR="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
+# A low-priority job that the queue stopped and reran starts here again; a stale exit_code would read as finished.
+rm -f "$RUN_DIR/exit_code"
 trap 'rc=$?; echo "[launch] exit=$rc at $(date -Is)"; echo "$rc" > "$RUN_DIR/exit_code"; exit $rc' EXIT
 echo "[launch] start $(date -Is) host=$(hostname) run_dir=$RUN_DIR"
 export MAMBA_EXE=/mnt/virtual_ai0001071-01239_SR006-nfs2/.local/bin/micromamba

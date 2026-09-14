@@ -42,6 +42,8 @@ class TrainConfig:
     eval_batch_size: int = 1024
     mixed_precision: str = "bf16"
     quantizer_warmup_steps: int = 0   # train the plain autoencoder first, then switch the quantizer on
+    # parameters whose name contains any of these get no weight decay (in addition to every 1-d parameter)
+    no_decay_keywords: list[str] = field(default_factory=list)
     comet: dict[str, Any] = field(default_factory=dict)
     run_name: str = "hier"
 
@@ -55,6 +57,37 @@ def lr_lambda(cfg: TrainConfig):
         progress = min(1.0, (step - cfg.warmup_steps) / max(1, cfg.steps - cfg.warmup_steps))
         return cfg.min_lr_ratio + (1 - cfg.min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
     return factor
+
+
+def param_groups(model: torch.nn.Module, weight_decay: float, no_decay_keywords=()) -> list[dict]:
+    """AdamW groups: decay for matrices, none for 1-d parameters or names matching a keyword."""
+    decay, no_decay = [], []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        exempt = parameter.dim() < 2 or any(keyword in name for keyword in no_decay_keywords)
+        (no_decay if exempt else decay).append(parameter)
+    return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
+
+
+@torch.no_grad()
+def scale_diagnostics(model: HierActionTokenizer, latents: torch.Tensor) -> dict[str, float]:
+    """The quantities that drift when nothing anchors the code scale: the code itself, the projection that reads
+    it, and the codebook it is matched against."""
+    out = {"code_norm": float(latents.detach().float().norm(dim=-1).mean()),
+           "from_code_norm": float(model.from_code.weight.detach().float().norm())}
+    codebook = getattr(model.quantizer, "codebook", None)
+    if isinstance(codebook, torch.Tensor):
+        out["codebook_norm"] = float(codebook.float().norm(dim=-1).mean())
+    return out
+
+
+def truncate_log(path: Path, step: int) -> None:
+    """Keep rows up to `step`: a rerun trains every later step again and would log it twice."""
+    if not path.exists():
+        return
+    kept = [line for line in path.read_text().splitlines() if line.strip() and json.loads(line)["step"] <= step]
+    path.write_text("".join(line + "\n" for line in kept))
 
 
 def build_model(cfg: TrainConfig, layout) -> HierActionTokenizer:
@@ -81,10 +114,8 @@ def train(cfg: TrainConfig) -> dict:
     layout = layout_from_manifest(cfg.manifest)
     eval_set = load_eval_set(cfg.eval_set) if accelerator.is_main_process else None
     model = build_model(cfg, layout).to(device)
-    decay = [p for _, p in model.named_parameters() if p.requires_grad and p.dim() >= 2]
-    no_decay = [p for _, p in model.named_parameters() if p.requires_grad and p.dim() < 2]
-    optimizer = torch.optim.AdamW([{"params": decay, "weight_decay": cfg.weight_decay},
-                                   {"params": no_decay, "weight_decay": 0.0}], lr=cfg.lr, betas=tuple(cfg.betas))
+    optimizer = torch.optim.AdamW(param_groups(model, cfg.weight_decay, cfg.no_decay_keywords),
+                                  lr=cfg.lr, betas=tuple(cfg.betas))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda(cfg))
 
     step = 0
@@ -96,6 +127,9 @@ def train(cfg: TrainConfig) -> dict:
         scheduler.load_state_dict(payload["scheduler"])
         step = int(payload["step"])
         accelerator.print(f"resumed from {latest} at step {step}")
+        if accelerator.is_main_process:          # a preempted attempt may have logged past its last checkpoint
+            for log_path in (out / "train_log.jsonl", out / "eval_log.jsonl"):
+                truncate_log(log_path, step)
 
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
 
@@ -107,6 +141,7 @@ def train(cfg: TrainConfig) -> dict:
     logger = RunLogger(enabled=accelerator.is_main_process, jsonl_path=out / "train_log.jsonl",
                        eval_jsonl_path=out / "eval_log.jsonl",
                        experiment_name=cfg.run_name, config={"train": asdict(cfg)},
+                       resume_key_path=out / "comet_experiment_key",
                        mode=str(cfg.comet.get("mode", "auto")), project=cfg.comet.get("project"),
                        workspace=cfg.comet.get("workspace"), tags=cfg.comet.get("tags"),
                        offline_directory=out / "comet_offline")
@@ -184,6 +219,7 @@ def train(cfg: TrainConfig) -> dict:
                       # an encoder that drifts out of the quantizer's range silently loses most of the vocabulary
                       "latent_abs_mean": float(latents.abs().mean()),
                       "latent_saturation": accelerator.unwrap_model(model).quantizer.saturation(latents),
+                      **scale_diagnostics(accelerator.unwrap_model(model), latents),
                       "lr": scheduler.get_last_lr()[0],
                       "chunks_seen": seen, "steps_per_s": cfg.log_every / max(time.time() - last_log, 1e-9),
                       "elapsed_s": time.time() - start_time}

@@ -113,7 +113,7 @@ class VQEMA(Quantizer):
     def __init__(self, vocab_size: int, code_dim: int, commitment: float = 0.25, decay: float = 0.99,
                  eps: float = 1e-5, dead_threshold: float = 1.0, kmeans_init: bool = True,
                  kmeans_iters: int = 10, restart_ratio: float = 0.1, seed_samples_per_code: int = 4,
-                 cosine: bool = False) -> None:
+                 cosine: bool = False, squash: bool = False) -> None:
         super().__init__()
         self.vocab_size, self.code_dim, self.out_dim = int(vocab_size), int(code_dim), int(code_dim)
         self.commitment, self.decay, self.eps, self.dead_threshold = float(commitment), float(decay), float(eps), float(dead_threshold)
@@ -121,9 +121,12 @@ class VQEMA(Quantizer):
         self.restart_ratio = float(restart_ratio)   # codes used far less than average are restarted
         self.seed_samples_per_code = int(seed_samples_per_code)
         # Nothing anchors the scale of a latent that a learned codebook consumes. Measured at 10 tokens: the code
-        # norm grew from 1.0 to 9.3 between steps 25k and 40k, the EMA codebook could not follow, and three
-        # quarters of the codes fell out of use. Comparing directions instead removes magnitude from the problem.
-        self.cosine = bool(cosine)
+        # norm grew from 1.0 to 9.3 between steps 25k and 40k and three quarters of the codes fell out of use.
+        # Two anchors: `cosine` compares directions and drops magnitude; `squash` passes the code through tanh,
+        # which bounds it to (-1, 1) but keeps magnitude. EMA means of squashed codes stay inside the same box.
+        if cosine and squash:
+            raise ValueError("cosine and squash are alternative ways to anchor the code scale; pick one")
+        self.cosine, self.squash = bool(cosine), bool(squash)
         codebook = torch.randn(self.vocab_size, self.code_dim) * 0.1
         self.register_buffer("codebook", codebook)
         self.register_buffer("cluster_size", torch.ones(self.vocab_size))
@@ -208,14 +211,18 @@ class VQEMA(Quantizer):
         self.cluster_size.fill_(1.0)
         self.initialized.fill_(True)
 
-    def _normalize(self, x: Tensor) -> Tensor:
-        return F.normalize(x, dim=-1) if self.cosine else x
+    def _anchor(self, x: Tensor) -> Tensor:
+        if self.cosine:
+            return F.normalize(x, dim=-1)
+        if self.squash:
+            return torch.tanh(x)
+        return x
 
     def bound(self, z: Tensor) -> Tensor:
-        return self._normalize(z.float())
+        return self._anchor(z.float())
 
     def forward(self, z: Tensor) -> QuantizerOutput:
-        z = self._normalize(z.float())
+        z = self._anchor(z.float())
         flat = z.reshape(-1, self.code_dim)
         if self.training and not bool(self.initialized):
             collected = self._collect(flat.detach())
@@ -249,8 +256,8 @@ class VQEMA(Quantizer):
                     self.codebook[victims] = replacement
                     self.embed_sum[victims] = replacement
                     self.cluster_size[victims] = 1.0
-                if self.cosine:
-                    self.codebook.copy_(self._normalize(self.codebook))
+                if self.cosine:                       # a mean of unit vectors is shorter than one
+                    self.codebook.copy_(F.normalize(self.codebook, dim=-1))
         aux = self.commitment * F.mse_loss(flat, quantized.detach())
         codes = flat + (quantized - flat).detach()
         return QuantizerOutput(codes=codes.view_as(z), indices=indices.view(z.shape[:-1]), aux_loss=aux)
