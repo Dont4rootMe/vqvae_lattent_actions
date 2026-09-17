@@ -144,3 +144,20 @@ def test_warmup_decodes_the_bounded_latents(model, layout):
     assert not torch.allclose(out["recon"], model.decode_latents(latents, mask))
     grid = model.quantizer.indices_to_codes(torch.arange(model.vocab_size))
     assert float(bounded.min()) >= float(grid.min()) - 0.01 and float(bounded.max()) <= float(grid.max()) + 0.01
+
+
+
+def test_qk_norm_reaches_every_attention_and_old_exports_still_load(tiny_model_config, tmp_path):
+    from vqvae_latent_actions.models.blocks import Attention
+    new = HierActionTokenizer(HierTokenizerConfig.from_dict({**tiny_model_config.to_dict(), "qk_norm": True}))
+    attentions = [m for m in new.modules() if isinstance(m, Attention)]
+    assert attentions and all(a.qk_norm for a in attentions)
+
+    legacy = {k: v for k, v in tiny_model_config.to_dict().items() if k != "qk_norm"}   # exported before the option
+    old = HierActionTokenizer(HierTokenizerConfig.from_dict(legacy))
+    assert not any(a.qk_norm for a in old.modules() if isinstance(a, Attention))
+    old.save_pretrained(tmp_path / "old")
+    HierActionTokenizer.from_pretrained(tmp_path / "old")
+    new.save_pretrained(tmp_path / "new")
+    HierActionTokenizer.from_pretrained(tmp_path / "new")
+    assert not list(tmp_path.rglob("*.tmp"))              # every file of an export lands with one rename

@@ -14,4 +14,5 @@ quantizer:
   # (9x by step 11k in one run, from step 27k in another) and the codebook collapses. Cosine held the scale
   # through a full 40k schedule at 10 tokens, RMSE 0.07443 against 0.0806 for ActionCodec (docs/runs.md, 2026-09-14).
   cosine: true             # match directions, drop magnitude
+  max_restarts_per_step: 64  # a healthy run had 735 codes under the restart floor on every step
   squash: false            # tanh-bound the code, keep magnitude (not validated)

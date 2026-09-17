@@ -16,3 +16,6 @@ ff_mult: 4
 dropout: 0.0
 value_embedding: mlp
 group_weights: null
+# Layer-normalize q and k in every attention. Without it one decoder attention grew its logits to 3e7 over 300k
+# steps and a 10-token run broke after step 212k (docs/runs.md, 2026-09-17).
+qk_norm: true

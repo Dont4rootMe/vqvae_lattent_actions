@@ -132,3 +132,37 @@ def test_rerun_of_a_finished_run_evaluates_the_last_step_once_and_keeps_counting
     train(_config(tmp_path, tiny_manifest, eval_path, steps=5))       # resumed at 3: data seen keeps growing
     rows = {r["step"]: r for r in map(json.loads, (run / "train_log.jsonl").read_text().splitlines())}
     assert rows[4]["chunks_seen"] == 4 * cfg.batch_size and rows[5]["chunks_seen"] == 5 * cfg.batch_size
+
+
+
+def test_snapshots_best_checkpoint_and_stability_signals(tmp_path, tiny_manifest, tiny_eval_set):
+    """A 10-token production run reached its best state at step 200k and broke by 220k; with only latest.pt kept the
+    good weights were gone. Keep periodic snapshots and the best evaluation, and let a rerun keep the best."""
+    from dataclasses import replace
+    from vqvae_latent_actions.data.chunks import save_eval_set
+    from vqvae_latent_actions.models.hier_tokenizer import HierActionTokenizer
+    eval_path = tmp_path / "eval.npz"
+    save_eval_set(tiny_eval_set, eval_path)
+    cfg = replace(_config(tmp_path, tiny_manifest, eval_path, steps=6), snapshot_every=3)
+    train(cfg)
+    run = tmp_path / "run"
+    assert sorted(p.name for p in (run / "snapshots").iterdir()) == ["step_0000003", "step_0000006"]
+    HierActionTokenizer.from_pretrained(run / "snapshots" / "step_0000003")
+
+    evals = [json.loads(line) for line in (run / "eval_log.jsonl").read_text().splitlines()]
+    best = json.loads((run / "best" / "best.json").read_text())
+    assert best["rmse"] == min(e["eval/rmse"] for e in evals)
+    assert best["step"] in {e["step"] for e in evals}
+    HierActionTokenizer.from_pretrained(run / "best")
+    assert all("eval/attn_max_logit" in e for e in evals)
+
+    rows = [json.loads(line) for line in (run / "train_log.jsonl").read_text().splitlines()]
+    assert all("grad_norm" in r and "codebook_restarts" in r for r in rows)
+
+    latest = run / "checkpoints" / "latest.pt"
+    payload = torch.load(latest, weights_only=False)
+    assert payload["best_rmse"] == best["rmse"]
+    payload["best_rmse"] = 0.0                             # a rerun must not replace a better best with a worse one
+    torch.save(payload, latest)
+    train(replace(cfg, steps=8))
+    assert json.loads((run / "best" / "best.json").read_text()) == best

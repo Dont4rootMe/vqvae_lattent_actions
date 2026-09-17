@@ -94,4 +94,39 @@ def model_report_extra(model) -> dict:
             "dim": model.config.dim, "free_queries": model.config.free_queries}
 
 
-__all__ = ["evaluate_tokenizer", "padding_invariance_mismatch", "model_report_extra"]
+@torch.no_grad()
+def attention_logit_report(model, eval_set: EvalSet, *, num: int = 64, device: Any = None) -> dict:
+    """Largest pre-softmax attention logit over every attention module, on a few chunks spread over the eval set.
+
+    Growth here preceded the late divergence of a production run (one decoder logit reached 3e7) long before the
+    loss showed anything, so it is logged with every evaluation.
+    """
+    from ..models.blocks import Attention
+    device = torch.device(device) if device is not None else next(model.parameters()).device
+    was_training = model.training
+    model.eval()
+    worst: dict[str, float] = {}
+
+    def probe(name):
+        def hook(module, inputs, output):
+            scores = module.logits(*inputs[:3])
+            finite = torch.isfinite(scores)
+            if bool(finite.any()):
+                worst[name] = max(worst.get(name, 0.0), float(scores[finite].abs().max()))
+        return hook
+
+    hooks = [m.register_forward_hook(probe(n)) for n, m in model.named_modules() if isinstance(m, Attention)]
+    try:
+        picks = np.linspace(0, len(eval_set.actions) - 1, num=min(num, len(eval_set.actions))).astype(int)
+        model.encode_decode(torch.as_tensor(eval_set.actions[picks], device=device),
+                            torch.as_tensor(eval_set.valid[picks], device=device))
+    finally:
+        for hook in hooks:
+            hook.remove()
+        if was_training:
+            model.train()
+    module, value = max(worst.items(), key=lambda item: item[1])
+    return {"max": value, "module": module}
+
+
+__all__ = ["evaluate_tokenizer", "padding_invariance_mismatch", "model_report_extra", "attention_logit_report"]

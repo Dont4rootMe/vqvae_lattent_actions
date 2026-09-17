@@ -62,3 +62,18 @@ def test_evaluate_reports_usage_per_token_position(tiny_model_config, tiny_eval_
 
     continuous = evaluate_tokenizer(model, tiny_eval_set, batch_size=4, device=device, quantize=False)["usage"]
     assert continuous["per_position"] == [] and continuous["min_position_perplexity"] == 1.0
+
+
+
+def test_attention_logit_report_names_the_largest_logit(tiny_model_config, tiny_eval_set, device):
+    import math
+    from vqvae_latent_actions.models.blocks import Attention
+    from vqvae_latent_actions.models.hier_tokenizer import HierTokenizerConfig
+    from vqvae_latent_actions.training.evaluate import attention_logit_report
+    torch.manual_seed(0)
+    model = HierActionTokenizer(HierTokenizerConfig.from_dict({**tiny_model_config.to_dict(), "qk_norm": True}))
+    model.train()
+    report = attention_logit_report(model, tiny_eval_set, num=8, device=device)
+    names = {n for n, m in model.named_modules() if isinstance(m, Attention)}
+    assert report["module"] in names and 0 < report["max"] <= math.sqrt(tiny_model_config.dim // tiny_model_config.heads) + 1e-4
+    assert model.training                                  # the probe leaves the mode as it found it

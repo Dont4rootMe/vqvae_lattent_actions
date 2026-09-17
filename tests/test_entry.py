@@ -74,3 +74,13 @@ def test_weight_decay_exemptions_compose():
     with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base=None):
         cfg = compose(config_name="config", overrides=["run_name=unit", "train.no_decay_keywords=[from_code,to_code]"])
     assert OmegaConf.to_container(cfg.train, resolve=True)["no_decay_keywords"] == ["from_code", "to_code"]
+
+
+
+def test_default_run_has_the_stability_settings():
+    with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base=None):
+        cfg = compose(config_name="config", overrides=["run_name=unit"])
+    payload = OmegaConf.to_container(cfg, resolve=True)
+    assert payload["model"]["qk_norm"] is True
+    assert payload["model"]["quantizer"]["max_restarts_per_step"] > 0
+    assert payload["train"]["snapshot_every"] > 0

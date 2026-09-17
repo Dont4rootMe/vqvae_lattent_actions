@@ -13,7 +13,7 @@ import torch
 from ..data.chunks import batch_to_inputs, layout_from_manifest, load_eval_set, train_loader
 from ..models.hier_tokenizer import HierActionTokenizer, HierTokenizerConfig
 from .comet import RunLogger
-from .evaluate import evaluate_tokenizer, model_report_extra, padding_invariance_mismatch
+from .evaluate import attention_logit_report, evaluate_tokenizer, model_report_extra, padding_invariance_mismatch
 from .metrics import write_report
 
 
@@ -39,6 +39,7 @@ class TrainConfig:
     log_every: int = 100
     eval_every: int = 10_000
     ckpt_every: int = 5_000
+    snapshot_every: int = 0           # >0 keeps an exported copy of the weights every N steps under snapshots/
     eval_batch_size: int = 1024
     mixed_precision: str = "bf16"
     quantizer_warmup_steps: int = 0   # train the plain autoencoder first, then switch the quantizer on
@@ -129,7 +130,7 @@ def train(cfg: TrainConfig) -> dict:
                                   lr=cfg.lr, betas=tuple(cfg.betas))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda(cfg))
 
-    step, resumed_seen, resumed_elapsed = 0, 0, 0.0
+    step, resumed_seen, resumed_elapsed, best_rmse = 0, 0, 0.0, math.inf
     latest = out / "checkpoints" / "latest.pt"
     if latest.exists():
         payload = torch.load(latest, map_location="cpu", weights_only=False)
@@ -139,6 +140,7 @@ def train(cfg: TrainConfig) -> dict:
         step = int(payload["step"])
         resumed_seen = int(payload.get("chunks_seen", step * cfg.batch_size * world))
         resumed_elapsed = float(payload.get("elapsed_s", 0.0))
+        best_rmse = float(payload.get("best_rmse", math.inf))
         accelerator.print(f"resumed from {latest} at step {step}")
     if accelerator.is_main_process:
         # Every start trims: a rerun trains again everything after its checkpoint, or everything when there is none.
@@ -167,6 +169,7 @@ def train(cfg: TrainConfig) -> dict:
                           f"{extra['vocab_size']} codes = {extra['bits_per_chunk']:.0f} bits/chunk")
 
     def run_eval(current: int) -> dict:
+        nonlocal best_rmse
         target = accelerator.unwrap_model(model)
         # the warmup trains a plain autoencoder, so until it is over the grid is not what the model reconstructs from
         quantized = current > cfg.quantizer_warmup_steps
@@ -176,11 +179,19 @@ def train(cfg: TrainConfig) -> dict:
         write_report(out / f"eval_step{current:07d}.json", f"{cfg.run_name}@{current}", summary,
                      {"step": current, **model_report_extra(target)})
         total, usage = summary["total"], summary["usage"]
+        attention = attention_logit_report(target, eval_set, device=device)
+        if quantized and total["rmse"] < best_rmse:          # a run can break late; keep the best state it reached
+            best_rmse = float(total["rmse"])
+            best = target.save_pretrained(out / "best")
+            marker = best / "best.json.tmp"
+            marker.write_text(json.dumps({"step": current, "rmse": best_rmse}))
+            marker.replace(best / "best.json")
         logger.log_metrics({"eval/rmse": total["rmse"], "eval/l1": total["l1"], "eval/max_abs": total["max_abs_mean"],
                             "eval/codes_used": usage["codes_used"], "eval/perplexity": usage["perplexity"],
                             "eval/min_position_perplexity": usage["min_position_perplexity"],
                             "eval/effective_bits": usage["effective_bits_per_chunk"],
                             "eval/quantized": int(quantized),
+                            "eval/attn_max_logit": attention["max"], "eval/attn_max_logit_module": attention["module"],
                             "eval/padding_mismatch": summary["padding_invariance_mismatch"]}, step=current, split="eval")
         codes = (f"codes={usage['codes_used']}/{usage['vocab_size']} perplexity={usage['perplexity']:.0f} "
                  f"min_pos_ppl={usage['min_position_perplexity']:.1f} "
@@ -195,6 +206,7 @@ def train(cfg: TrainConfig) -> dict:
         directory = out / "checkpoints"
         directory.mkdir(parents=True, exist_ok=True)
         payload = {"step": step, "chunks_seen": seen, "elapsed_s": resumed_elapsed + time.time() - start_time,
+                   "best_rmse": best_rmse,
                    "model": accelerator.unwrap_model(model).state_dict(),
                    "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "config": asdict(cfg)}
         tmp = directory / "latest.tmp"
@@ -219,8 +231,9 @@ def train(cfg: TrainConfig) -> dict:
         with accelerator.autocast():
             output = model(actions, mask, quantize=quantize)
         accelerator.backward(output["loss"])
+        grad_norm = None
         if cfg.grad_clip:
-            accelerator.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            grad_norm = accelerator.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
@@ -236,6 +249,8 @@ def train(cfg: TrainConfig) -> dict:
                       "latent_abs_mean": float(latents.abs().mean()),
                       "latent_saturation": accelerator.unwrap_model(model).quantizer.saturation(latents),
                       **scale_diagnostics(accelerator.unwrap_model(model), latents),
+                      "grad_norm": float(grad_norm) if grad_norm is not None else float("nan"),
+                      "codebook_restarts": accelerator.unwrap_model(model).quantizer.pop_restart_count(),
                       "lr": scheduler.get_last_lr()[0],
                       "chunks_seen": seen, "steps_per_s": cfg.log_every / max(time.time() - last_log, 1e-9),
                       "elapsed_s": resumed_elapsed + time.time() - start_time}
@@ -254,6 +269,8 @@ def train(cfg: TrainConfig) -> dict:
         if step % cfg.ckpt_every == 0 or step == cfg.steps:
             save_checkpoint()
             accelerator.wait_for_everyone()
+        if cfg.snapshot_every and step % cfg.snapshot_every == 0 and accelerator.is_main_process:
+            accelerator.unwrap_model(model).save_pretrained(out / "snapshots" / f"step_{step:07d}")
 
     if accelerator.is_main_process:
         target = accelerator.unwrap_model(model)

@@ -49,6 +49,10 @@ class Quantizer(nn.Module):
         """Fraction of the code that sits where the quantizer can no longer resolve it. 0 unless bounded."""
         return 0.0
 
+    def pop_restart_count(self) -> int:
+        """Codes restarted since the last call. 0 for quantizers without a learned codebook."""
+        return 0
+
     def indices_to_codes(self, indices: Tensor) -> Tensor:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -113,7 +117,7 @@ class VQEMA(Quantizer):
     def __init__(self, vocab_size: int, code_dim: int, commitment: float = 0.25, decay: float = 0.99,
                  eps: float = 1e-5, dead_threshold: float = 1.0, kmeans_init: bool = True,
                  kmeans_iters: int = 10, restart_ratio: float = 0.1, seed_samples_per_code: int = 4,
-                 cosine: bool = False, squash: bool = False) -> None:
+                 cosine: bool = False, squash: bool = False, max_restarts_per_step: int = 0) -> None:
         super().__init__()
         self.vocab_size, self.code_dim, self.out_dim = int(vocab_size), int(code_dim), int(code_dim)
         self.commitment, self.decay, self.eps, self.dead_threshold = float(commitment), float(decay), float(eps), float(dead_threshold)
@@ -127,6 +131,9 @@ class VQEMA(Quantizer):
         if cosine and squash:
             raise ValueError("cosine and squash are alternative ways to anchor the code scale; pick one")
         self.cosine, self.squash = bool(cosine), bool(squash)
+        # 0 = no cap. A healthy production run had 735 codes under the floor on every step, i.e. constant rewriting.
+        self.max_restarts_per_step = int(max_restarts_per_step)
+        self._restarts = 0
         codebook = torch.randn(self.vocab_size, self.code_dim) * 0.1
         self.register_buffer("codebook", codebook)
         self.register_buffer("cluster_size", torch.ones(self.vocab_size))
@@ -254,6 +261,9 @@ class VQEMA(Quantizer):
                 # many codes, which is the collapse the restart exists to prevent; with a batch smaller than the
                 # codebook that happens on every step.
                 count = min(int(dead.sum()), int(flat.shape[0]))
+                if self.max_restarts_per_step:
+                    count = min(count, self.max_restarts_per_step)
+                self._restarts += count
                 if count:
                     scores = (-self.cluster_size).masked_fill(~dead, float("-inf"))
                     victims = scores.topk(count).indices                                # the emptiest codes
@@ -271,6 +281,10 @@ class VQEMA(Quantizer):
 
     def indices_to_codes(self, indices: Tensor) -> Tensor:
         return self.codebook[indices]
+
+    def pop_restart_count(self) -> int:
+        count, self._restarts = self._restarts, 0
+        return count
 
 
 class LFQWrapper(Quantizer):

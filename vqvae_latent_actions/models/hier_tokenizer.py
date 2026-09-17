@@ -46,6 +46,7 @@ class HierTokenizerConfig:
     dropout: float = 0.0
     value_embedding: str = "mlp"      # "mlp" | "linear"
     group_weights: dict[str, float] | None = None
+    qk_norm: bool = False             # off here so exports made before the option load unchanged; on in the configs
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -88,15 +89,17 @@ class HierActionTokenizer(nn.Module):
         self.step_queries = nn.Parameter(torch.randn(queries, d) * 0.02)
         # group queries stay isolated inside the cross-attention stack; the queries of a step mix right after it
         self.enc_step = nn.ModuleList([PerceiverLayer(d, config.heads, cross=True, self_attention=False,
-                                                      mult=config.ff_mult, dropout=config.dropout)
+                                                      mult=config.ff_mult, dropout=config.dropout, qk_norm=config.qk_norm)
                                        for _ in range(config.enc_step_layers)])
-        self.enc_step_mix = nn.ModuleList([SelfBlock(d, config.heads, config.dropout),
+        self.enc_step_mix = nn.ModuleList([SelfBlock(d, config.heads, config.dropout, config.qk_norm),
                                            FFBlock(d, config.ff_mult, config.dropout)])
         self.enc_time = nn.ModuleList([PerceiverLayer(d, config.heads, cross=False, mult=config.ff_mult,
-                                                      dropout=config.dropout) for _ in range(config.enc_time_layers)])
+                                                      dropout=config.dropout, qk_norm=config.qk_norm)
+                                       for _ in range(config.enc_time_layers)])
         self.latent_queries = nn.Parameter(torch.randn(config.num_tokens, d) * 0.02)
         self.enc_latent = nn.ModuleList([PerceiverLayer(d, config.heads, cross=True, mult=config.ff_mult,
-                                                        dropout=config.dropout) for _ in range(config.enc_latent_layers)])
+                                                        dropout=config.dropout, qk_norm=config.qk_norm)
+                                         for _ in range(config.enc_latent_layers)])
         self.enc_norm = nn.LayerNorm(d)
 
         self.quantizer = build_quantizer(config.quantizer)
@@ -105,13 +108,14 @@ class HierActionTokenizer(nn.Module):
 
         # decoder
         self.latent_pos = nn.Parameter(torch.randn(config.num_tokens, d) * 0.02)
-        self.dec_latent = nn.ModuleList([nn.ModuleList([SelfBlock(d, config.heads, config.dropout),
+        self.dec_latent = nn.ModuleList([nn.ModuleList([SelfBlock(d, config.heads, config.dropout, config.qk_norm),
                                                         FFBlock(d, config.ff_mult, config.dropout)])
                                          for _ in range(config.dec_latent_layers)])
         self.out_queries = nn.Parameter(torch.randn(queries, d) * 0.02)
         self.mask_emb = nn.Parameter(torch.randn(dims, d) * 0.02)
         self.dec_blocks = nn.ModuleList([PerceiverLayer(d, config.heads, cross=True, mult=config.ff_mult,
-                                                        dropout=config.dropout) for _ in range(config.dec_layers)])
+                                                        dropout=config.dropout, qk_norm=config.qk_norm)
+                                         for _ in range(config.dec_layers)])
         self.dec_norm = nn.LayerNorm(d)
         self.head_group_w = nn.Parameter(torch.randn(dims, d) * (d ** -0.5))
         self.head_free_w = nn.Parameter(torch.randn(dims, d) * (d ** -0.5))
@@ -250,8 +254,13 @@ class HierActionTokenizer(nn.Module):
     def save_pretrained(self, directory: str | Path) -> Path:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "config.json").write_text(json.dumps(self.config.to_dict(), indent=1))
-        torch.save(self.state_dict(), directory / "model.pt")
+        # each file lands with one rename: a job stopped in the middle of an export never leaves a torn model
+        weights = directory / "model.pt.tmp"
+        torch.save(self.state_dict(), weights)
+        weights.replace(directory / "model.pt")
+        config = directory / "config.json.tmp"
+        config.write_text(json.dumps(self.config.to_dict(), indent=1))
+        config.replace(directory / "config.json")
         return directory
 
     @classmethod

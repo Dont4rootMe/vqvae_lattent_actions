@@ -238,3 +238,20 @@ def test_vqema_matching_is_exact_under_bf16_autocast(anchor):
     with torch.autocast("cpu", dtype=torch.bfloat16):
         mixed = q(z).indices
     assert torch.equal(exact, mixed)
+
+
+
+def test_vqema_caps_restarts_per_step_and_counts_them():
+    """A healthy 20-token production run had 735 codes under the restart floor on every step: the codebook was being
+    rewritten constantly. The cap bounds that churn, and the count makes it visible in the train log."""
+    torch.manual_seed(0)
+    capped = VQEMA(vocab_size=64, code_dim=4, kmeans_init=False, decay=0.5, restart_ratio=1.0, max_restarts_per_step=3)
+    free = VQEMA(vocab_size=64, code_dim=4, kmeans_init=False, decay=0.5, restart_ratio=1.0)
+    capped.train(); free.train()
+    for _ in range(4):
+        batch = torch.randn(1, 32, 4)
+        capped(batch); free(batch)
+    assert 0 < capped.pop_restart_count() <= 3 * 4
+    assert capped.pop_restart_count() == 0                 # reading resets the counter
+    assert free.pop_restart_count() > 3 * 4
+    assert FSQ(levels=[4, 4]).pop_restart_count() == 0     # quantizers without restarts report none

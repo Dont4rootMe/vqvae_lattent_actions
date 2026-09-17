@@ -23,6 +23,7 @@ train:
   log_every: 100
   eval_every: 10000
   ckpt_every: 5000
+  snapshot_every: 20000    # exported weights kept every N steps; best/ holds the best evaluation
   eval_batch_size: 1024
   mixed_precision: bf16
   # The quantizer must not be switched on from step 0: it collapses to a single code and the encoder follows it
