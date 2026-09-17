@@ -166,3 +166,49 @@ def test_snapshots_best_checkpoint_and_stability_signals(tmp_path, tiny_manifest
     torch.save(payload, latest)
     train(replace(cfg, steps=8))
     assert json.loads((run / "best" / "best.json").read_text()) == best
+
+
+
+def test_a_kill_during_a_snapshot_export_is_redone_on_the_rerun(tmp_path, tiny_manifest, tiny_eval_set, monkeypatch):
+    """The snapshot used to be exported after latest.pt for the same step: a kill during the export resumed past that
+    step and the snapshot was never written."""
+    from dataclasses import replace
+    import pytest
+    from vqvae_latent_actions.data.chunks import save_eval_set
+    from vqvae_latent_actions.models.hier_tokenizer import HierActionTokenizer
+    eval_path = tmp_path / "eval.npz"
+    save_eval_set(tiny_eval_set, eval_path)
+    cfg = replace(_config(tmp_path, tiny_manifest, eval_path, steps=6), snapshot_every=4, ckpt_every=4)
+    original = HierActionTokenizer.save_pretrained
+
+    def killed(self, directory):
+        if str(directory).endswith("step_0000004"):
+            raise KeyboardInterrupt("killed during the snapshot export")
+        return original(self, directory)
+
+    monkeypatch.setattr(HierActionTokenizer, "save_pretrained", killed)
+    with pytest.raises(KeyboardInterrupt):
+        train(cfg)
+    monkeypatch.setattr(HierActionTokenizer, "save_pretrained", original)
+    train(cfg)
+    HierActionTokenizer.from_pretrained(tmp_path / "run" / "snapshots" / "step_0000004")
+
+
+def test_rerun_keeps_a_best_export_newer_than_its_checkpoint(tmp_path, tiny_manifest, tiny_eval_set):
+    """best/ is exported during eval, before latest.pt for that step. A kill in between resumes from an older
+    checkpoint whose best_rmse does not know about that export; best.json must be read too."""
+    from dataclasses import replace
+    from vqvae_latent_actions.data.chunks import save_eval_set
+    eval_path = tmp_path / "eval.npz"
+    save_eval_set(tiny_eval_set, eval_path)
+    cfg = _config(tmp_path, tiny_manifest, eval_path, steps=4)
+    train(cfg)
+    run = tmp_path / "run"
+    marker = run / "best" / "best.json"
+    marker.write_text(json.dumps({"step": 4, "rmse": 0.0}))                 # an export no evaluation can beat
+    latest = run / "checkpoints" / "latest.pt"
+    payload = torch.load(latest, weights_only=False)
+    payload["best_rmse"] = float("inf")                                    # the checkpoint predates that export
+    torch.save(payload, latest)
+    train(replace(cfg, steps=6))
+    assert json.loads(marker.read_text()) == {"step": 4, "rmse": 0.0}

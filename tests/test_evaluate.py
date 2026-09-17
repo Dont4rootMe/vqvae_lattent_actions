@@ -77,3 +77,17 @@ def test_attention_logit_report_names_the_largest_logit(tiny_model_config, tiny_
     names = {n for n, m in model.named_modules() if isinstance(m, Attention)}
     assert report["module"] in names and 0 < report["max"] <= math.sqrt(tiny_model_config.dim // tiny_model_config.heads) + 1e-4
     assert model.training                                  # the probe leaves the mode as it found it
+
+
+
+def test_attention_logit_report_survives_a_diverged_model(tiny_model_config, tiny_eval_set, device):
+    """A NaN model gives no finite logit anywhere; the probe must report that, not raise between DDP barriers."""
+    import math
+    from vqvae_latent_actions.training.evaluate import attention_logit_report
+    torch.manual_seed(0)
+    model = HierActionTokenizer(tiny_model_config)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.fill_(float("nan"))
+    report = attention_logit_report(model, tiny_eval_set, num=4, device=device)
+    assert math.isnan(report["max"]) and report["module"] == "non-finite"

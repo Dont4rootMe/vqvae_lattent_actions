@@ -142,6 +142,14 @@ def train(cfg: TrainConfig) -> dict:
         resumed_elapsed = float(payload.get("elapsed_s", 0.0))
         best_rmse = float(payload.get("best_rmse", math.inf))
         accelerator.print(f"resumed from {latest} at step {step}")
+    best_marker = out / "best" / "best.json"
+    if best_marker.exists():
+        # best/ is exported during eval, before latest.pt for that step, so after a kill in between it is newer than
+        # the checkpoint the rerun resumes from; without this a slightly worse re-evaluation could replace it.
+        try:
+            best_rmse = min(best_rmse, float(json.loads(best_marker.read_text())["rmse"]))
+        except (ValueError, KeyError, TypeError):
+            pass
     if accelerator.is_main_process:
         # Every start trims: a rerun trains again everything after its checkpoint, or everything when there is none.
         # A run that already reached the last step evaluates it again, so that row goes too.
@@ -266,11 +274,13 @@ def train(cfg: TrainConfig) -> dict:
                 last_summary = run_eval(step)
                 model.train()
             accelerator.wait_for_everyone()
+        if cfg.snapshot_every and step % cfg.snapshot_every == 0 and accelerator.is_main_process:
+            # Before latest.pt for this step: a kill during the export then resumes from the previous checkpoint and
+            # exports again, instead of resuming past this step with the snapshot missing for good.
+            accelerator.unwrap_model(model).save_pretrained(out / "snapshots" / f"step_{step:07d}")
         if step % cfg.ckpt_every == 0 or step == cfg.steps:
             save_checkpoint()
             accelerator.wait_for_everyone()
-        if cfg.snapshot_every and step % cfg.snapshot_every == 0 and accelerator.is_main_process:
-            accelerator.unwrap_model(model).save_pretrained(out / "snapshots" / f"step_{step:07d}")
 
     if accelerator.is_main_process:
         target = accelerator.unwrap_model(model)

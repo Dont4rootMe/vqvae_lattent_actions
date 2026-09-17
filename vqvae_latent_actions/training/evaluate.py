@@ -125,6 +125,8 @@ def attention_logit_report(model, eval_set: EvalSet, *, num: int = 64, device: A
             hook.remove()
         if was_training:
             model.train()
+    if not worst:                  # no finite logit anywhere: the model has diverged; report it instead of raising
+        return {"max": float("nan"), "module": "non-finite"}
     module, value = max(worst.items(), key=lambda item: item[1])
     return {"max": value, "module": module}
 
