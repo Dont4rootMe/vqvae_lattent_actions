@@ -30,6 +30,13 @@ train:
   # into a constant. Training the plain autoencoder first fixes this (see docs/runs.md, 2026-09-12).
   quantizer_warmup_steps: 10000
   no_decay_keywords: []    # e.g. [from_code, to_code]: exempt the code projections from weight decay
+  # Per-chunk augmentation of input and target alike, off by default (docs/runs.md, OOD results 2026-09-21).
+  augment:
+    amplitude_prob: 0.0
+    amplitude_range: [0.5, 1.5]
+    noise_prob: 0.0
+    noise_sigma: 0.02
+    group_drop_prob: 0.0
 
 comet:
   mode: auto               # auto | online | offline | disabled

@@ -212,3 +212,26 @@ def test_rerun_keeps_a_best_export_newer_than_its_checkpoint(tmp_path, tiny_mani
     torch.save(payload, latest)
     train(replace(cfg, steps=6))
     assert json.loads(marker.read_text()) == {"step": 4, "rmse": 0.0}
+
+
+def test_training_with_augmentation_runs_and_logs_it(tmp_path, tiny_manifest, tiny_eval_set):
+    from dataclasses import replace
+    from vqvae_latent_actions.data.chunks import save_eval_set
+    eval_path = tmp_path / "eval.npz"
+    save_eval_set(tiny_eval_set, eval_path)
+    cfg = replace(_config(tmp_path, tiny_manifest, eval_path, steps=3),
+                  augment={"amplitude_prob": 1.0, "amplitude_range": [0.5, 1.5], "noise_prob": 1.0,
+                           "noise_sigma": 0.05, "group_drop_prob": 1.0})
+    summary = train(cfg)
+    assert summary["total"]["n"] == len(tiny_eval_set)
+    config = json.loads((tmp_path / "run" / "config.json").read_text())
+    assert config["augment"]["group_drop_prob"] == 1.0
+
+
+def test_unknown_augmentation_key_is_rejected(tmp_path, tiny_manifest, tiny_eval_set):
+    from dataclasses import replace
+    from vqvae_latent_actions.data.chunks import save_eval_set
+    eval_path = tmp_path / "eval.npz"
+    save_eval_set(tiny_eval_set, eval_path)
+    with pytest.raises(TypeError):
+        train(replace(_config(tmp_path, tiny_manifest, eval_path, steps=1), augment={"amplitude_probability": 1.0}))

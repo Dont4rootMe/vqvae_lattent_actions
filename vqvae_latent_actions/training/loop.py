@@ -12,6 +12,7 @@ import torch
 
 from ..data.chunks import batch_to_inputs, layout_from_manifest, load_eval_set, train_loader
 from ..models.hier_tokenizer import HierActionTokenizer, HierTokenizerConfig
+from .augment import AugmentConfig, augment
 from .comet import RunLogger
 from .evaluate import attention_logit_report, evaluate_tokenizer, model_report_extra, padding_invariance_mismatch
 from .metrics import write_report
@@ -45,6 +46,7 @@ class TrainConfig:
     quantizer_warmup_steps: int = 0   # train the plain autoencoder first, then switch the quantizer on
     # parameters whose name contains any of these get no weight decay (in addition to every 1-d parameter)
     no_decay_keywords: list[str] = field(default_factory=list)
+    augment: dict[str, Any] = field(default_factory=dict)   # AugmentConfig fields; empty = off
     comet: dict[str, Any] = field(default_factory=dict)
     run_name: str = "hier"
 
@@ -118,6 +120,7 @@ def train(cfg: TrainConfig) -> dict:
     rank, world = accelerator.process_index, accelerator.num_processes
     device = accelerator.device
     set_seed(cfg.seed, device_specific=True)
+    augment_cfg = AugmentConfig.from_dict(cfg.augment)          # validate before anything is written
     out = Path(cfg.out_dir)
     if accelerator.is_main_process:
         out.mkdir(parents=True, exist_ok=True)
@@ -126,6 +129,8 @@ def train(cfg: TrainConfig) -> dict:
     layout = layout_from_manifest(cfg.manifest)
     eval_set = load_eval_set(cfg.eval_set) if accelerator.is_main_process else None
     model = build_model(cfg, layout).to(device)
+    membership = layout.membership().to(device)
+    augment_gen = torch.Generator(device=device).manual_seed(cfg.seed * 1000 + rank)
     optimizer = torch.optim.AdamW(param_groups(model, cfg.weight_decay, cfg.no_decay_keywords),
                                   lr=cfg.lr, betas=tuple(cfg.betas))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda(cfg))
@@ -235,6 +240,7 @@ def train(cfg: TrainConfig) -> dict:
             batch = next(iterator)
         actions, mask, _ = batch_to_inputs(batch)
         actions, mask = actions.to(device, non_blocking=True), mask.to(device, non_blocking=True)
+        actions, mask = augment(actions, mask, membership, augment_cfg, generator=augment_gen)
         quantize = step >= cfg.quantizer_warmup_steps
         with accelerator.autocast():
             output = model(actions, mask, quantize=quantize)

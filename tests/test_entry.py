@@ -84,3 +84,16 @@ def test_default_run_has_the_stability_settings():
     assert payload["model"]["qk_norm"] is True
     assert payload["model"]["quantizer"]["max_restarts_per_step"] > 0
     assert payload["train"]["snapshot_every"] > 0
+
+
+def test_augmentation_is_off_by_default_and_overridable():
+    from train import build_train_config
+    from vqvae_latent_actions.training.augment import AugmentConfig
+    with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base=None):
+        default = compose(config_name="config", overrides=["run_name=unit"])
+        on = compose(config_name="config", overrides=[
+            "run_name=unit", "train.augment.amplitude_prob=0.3", "train.augment.noise_prob=0.3",
+            "train.augment.group_drop_prob=0.2", "train.augment.amplitude_range=[0.6,1.6]"])
+    assert not AugmentConfig.from_dict(build_train_config(default).augment).enabled
+    cfg = AugmentConfig.from_dict(build_train_config(on).augment)
+    assert cfg.amplitude_prob == 0.3 and cfg.group_drop_prob == 0.2 and cfg.amplitude_range == (0.6, 1.6)
