@@ -186,3 +186,20 @@ def test_config_reaches_the_train_config():
     assert not IsometryConfig.from_dict(build_train_config(default).isometry).enabled
     cfg = IsometryConfig.from_dict(build_train_config(on).isometry)
     assert cfg.weight == 3.0 and cfg.every == 4
+
+
+def test_the_estimate_survives_bf16_autocast():
+    """A central difference in bf16 is rounding noise, and noise reads as a perfect geometry — so probe in fp32."""
+    from vqvae_latent_actions.training.isometry import IsometryConfig, isometry_penalty
+    torch.manual_seed(0)
+    m = 8
+    q, _ = torch.linalg.qr(torch.randn(m, m))
+    stretched = (q @ torch.diag(torch.tensor([8.0, 4.0] + [0.2] * (m - 2)))).float()
+    z = torch.randn(2048, m // 4, 4)
+    cfg = IsometryConfig(weight=1.0, subbatch=2048, alpha_jitter=0.0)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        got = isometry_penalty(_linear_decoder(stretched), z, None, cfg, generator=torch.Generator().manual_seed(1))
+    eigenvalues = torch.linalg.eigvalsh(stretched.T @ stretched)
+    expected = float((eigenvalues ** 2).sum() / eigenvalues.sum() ** 2)
+    assert got["rdm"] == pytest.approx(expected, rel=0.2)
+    assert got["participation_ratio"] == pytest.approx(1.0 / expected, rel=0.2)

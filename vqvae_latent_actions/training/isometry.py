@@ -72,6 +72,15 @@ def isometry_penalty(decode: Callable[[Tensor], Tensor], latents: Tensor, weight
     """
     if not cfg.enabled:
         return None
+    # bf16 has 7 mantissa bits: a central difference over a step of 1% would be pure rounding noise, and noise looks
+    # isotropic, so the penalty would report a perfect geometry and pull on nothing. The probes run in fp32.
+    device_type = latents.device.type
+    with torch.autocast(device_type=device_type, enabled=False):
+        return _penalty(decode, latents.float(), None if weights is None else weights.float(), cfg, generator)
+
+
+def _penalty(decode, latents: Tensor, weights: Tensor | None, cfg: IsometryConfig,
+             generator: torch.Generator | None) -> dict:
     z = _probe_points(latents, cfg, generator)
     gen_device = generator.device if generator is not None else z.device
     scale = z.detach().pow(2).mean().sqrt().clamp_min(1e-3)
@@ -81,7 +90,7 @@ def isometry_penalty(decode: Callable[[Tensor], Tensor], latents: Tensor, weight
         return (decode(z + eps * direction) - decode(z - eps * direction)) / (2 * eps)
 
     v, w = (torch.randn(z.shape, generator=generator, device=gen_device).to(z.device, z.dtype) for _ in range(2))
-    jv, jw = jacobian_product(v), jacobian_product(w)
+    jv, jw = jacobian_product(v).float(), jacobian_product(w).float()
     h = 1.0 if weights is None else weights[: z.shape[0]].to(jv.dtype)
     dims = tuple(range(1, jv.dim()))
     trace = (h * jv * jv).sum(dim=dims)                      # [B]: v^T G v, an unbiased draw of Tr(G)
