@@ -216,7 +216,8 @@ class HierActionTokenizer(nn.Module):
         return out * mask.to(out.dtype)
 
     # ------------------------------------------------------------------ full passes
-    def forward(self, actions: Tensor, mask: Tensor, quantize: bool = True) -> dict[str, Tensor]:
+    def forward(self, actions: Tensor, mask: Tensor, quantize: bool = True, isometry=None,
+                isometry_generator=None) -> dict[str, Tensor]:
         """`quantize=False` trains the plain autoencoder: useful as a warmup so the latents become informative
         before the grid is imposed on them. The latents still pass through the quantizer's `bound`, so the warmup
         and the quantized phase share one value range; feeding the decoder raw latents instead lets the encoder
@@ -230,8 +231,18 @@ class HierActionTokenizer(nn.Module):
         recon_mse = (((recon - target) ** 2) * weights).sum() / weights.sum().clamp_min(1.0)
         loss = recon_mse + (quantized.aux_loss.to(recon_mse.dtype) if quantize else recon_mse.new_zeros(()))
         reported_aux = quantized.aux_loss.detach() if quantize else recon_mse.new_zeros(())
-        return {"loss": loss, "recon_mse": recon_mse.detach(), "aux_loss": reported_aux,
-                "indices": quantized.indices, "recon": recon, "latents": latents}
+        out = {"loss": loss, "recon_mse": recon_mse.detach(), "aux_loss": reported_aux,
+               "indices": quantized.indices, "recon": recon, "latents": latents}
+        if isometry is not None and isometry.enabled:
+            # the geometry is a property of the decoder, so the probes start from the codes it is given
+            from ..training.isometry import isometry_penalty
+            penalty = isometry_penalty(lambda z: self.decode_latents(z, mask[: z.shape[0]]), codes,
+                                       weights[: codes.shape[0]], isometry, generator=isometry_generator)
+            out["loss"] = out["loss"] + penalty["loss"].to(out["loss"].dtype)
+            out["iso_loss"] = penalty["loss"].detach()
+            out["iso_rdm"] = penalty["rdm"]
+            out["iso_participation_ratio"] = penalty["participation_ratio"]
+        return out
 
     @torch.no_grad()
     def tokenize(self, actions: Tensor, mask: Tensor) -> Tensor:

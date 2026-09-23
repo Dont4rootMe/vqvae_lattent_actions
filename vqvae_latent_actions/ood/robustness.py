@@ -156,5 +156,41 @@ def latent_interpolation(model, eval_set: EvalSet, *, num_pairs: int = 256, alph
             "endpoint_distance": float(to_start[-1].mean())}
 
 
-__all__ = ["amplitude_sweep", "encode_decode", "group_dropout", "latent_interpolation", "noise_sweep",
+@torch.no_grad()
+def jacobian_geometry(model, eval_set: EvalSet, *, num: int = 512, probes: int = 8, epsilon: float = 0.01,
+                      seed: int = 0, device: Any = None) -> dict:
+    """How isotropic the decoder is around real chunks: the participation ratio of the eigenvalues of `J^T H J`.
+
+    `m` latent dimensions with equal gain give `m`; a decoder that answers along a few directions only gives a small
+    number, and a VLA then has to learn a latent space that stretches unevenly. Probes are finite differences, so
+    this works on any exported model.
+    """
+    dev = _device(model, device)
+    rng = np.random.default_rng(seed)
+    picks = rng.choice(len(eval_set), size=min(num, len(eval_set)), replace=False)
+    actions = torch.as_tensor(eval_set.actions[picks], device=dev)
+    mask = torch.as_tensor(eval_set.valid[picks], device=dev)
+    codes = model.quantize(model.encode_continuous(actions, mask)).codes
+    weights = mask.to(codes.dtype)
+    scale = codes.pow(2).mean().sqrt().clamp_min(1e-3) * epsilon
+    traces, crosses = [], []
+    gen = torch.Generator(device=dev).manual_seed(seed)
+    directions = [torch.randn(codes.shape, generator=gen, device=dev, dtype=codes.dtype) for _ in range(probes + 1)]
+    products = [(model.decode_latents(codes + scale * d, mask) - model.decode_latents(codes - scale * d, mask))
+                / (2 * scale) for d in directions]
+    dims = tuple(range(1, products[0].dim()))
+    for i in range(probes):
+        traces.append((weights * products[i] * products[i]).sum(dim=dims))
+        crosses.append((weights * products[i] * products[i + 1]).sum(dim=dims))
+    trace = torch.stack(traces).mean()
+    trace_squared = torch.stack(crosses).pow(2).mean()
+    latent_dims = int(codes[0].numel())
+    return {"chunks": int(len(picks)), "latent_dims": latent_dims, "probes": probes,
+            "trace": float(trace), "trace_squared": float(trace_squared),
+            "rdm": float(trace_squared / trace.clamp_min(1e-12) ** 2),
+            "participation_ratio": float(trace.clamp_min(1e-12) ** 2 / trace_squared.clamp_min(1e-12)),
+            "participation_fraction": float(trace.clamp_min(1e-12) ** 2 / trace_squared.clamp_min(1e-12)) / latent_dims}
+
+
+__all__ = ["amplitude_sweep", "encode_decode", "group_dropout", "jacobian_geometry", "latent_interpolation", "noise_sweep",
            "reconstruction", "time_sweep", "token_agreement"]

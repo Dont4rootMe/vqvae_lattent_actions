@@ -118,3 +118,19 @@ def test_cli_writes_a_report_for_an_exported_model(model, tiny_eval_set, tmp_pat
     assert [r["sigma"] for r in result["noise"]] == [0.0, 0.1]
     assert (tmp_path / "reports" / "cli.json").exists()
     assert (tmp_path / "reports" / "cli.md").exists()
+
+
+def test_jacobian_geometry_reports_the_participation_ratio(model, tiny_eval_set):
+    from vqvae_latent_actions.ood.robustness import jacobian_geometry
+    out = jacobian_geometry(model, tiny_eval_set, num=8, probes=4)
+    assert out["latent_dims"] == model.num_tokens * model.quantizer.code_dim
+    assert 0.0 < out["participation_ratio"] <= out["latent_dims"] * 1.5
+    assert out["participation_fraction"] == pytest.approx(out["participation_ratio"] / out["latent_dims"])
+
+
+def test_the_report_carries_the_jacobian_section(model, tiny_eval_set, tmp_path):
+    from vqvae_latent_actions.ood.report import render_markdown, run_suite
+    result = run_suite(model, tiny_eval_set, sigmas=[0.0], factors=[2.0], time_factors=[2.0], batch_size=4,
+                       num_pairs=3)
+    assert result["jacobian"]["participation_ratio"] > 0
+    assert "Decoder Jacobian" in render_markdown(result, "tiny")

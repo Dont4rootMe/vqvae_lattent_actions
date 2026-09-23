@@ -25,6 +25,8 @@ def run_suite(model, eval_set: EvalSet, *, layout: UnifiedLayout | None = None, 
         "groups": robustness.group_dropout(model, eval_set, layout, **common),
         "interpolation": robustness.latent_interpolation(model, eval_set, num_pairs=num_pairs, seed=seed,
                                                          device=device),
+        "jacobian": robustness.jacobian_geometry(model, eval_set, num=min(512, len(eval_set)), seed=seed,
+                                                 device=device),
     }
 
 
@@ -53,6 +55,12 @@ def render_markdown(result: dict, name: str) -> str:
               f"pairs={interp['num_pairs']} midpoint_ratio={interp['midpoint_ratio']:.3f} "
               f"monotone_fraction={interp['monotone_fraction']:.3f} "
               f"endpoint_distance={interp['endpoint_distance']:.4f}", ""]
+    j = result.get("jacobian")
+    if j:
+        lines += ["## Decoder Jacobian", "",
+                  f"chunks={j['chunks']} latent_dims={j['latent_dims']} "
+                  f"participation_ratio={j['participation_ratio']:.2f} "
+                  f"({100 * j['participation_fraction']:.1f}% of the latent dimensions) rdm={j['rdm']:.4f}", ""]
     return "\n".join(lines)
 
 

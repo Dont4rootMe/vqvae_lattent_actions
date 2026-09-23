@@ -37,6 +37,14 @@ train:
     noise_prob: 0.0
     noise_sigma: 0.02
     group_drop_prob: 0.0
+  # Relaxed distortion measure on the decoder's Jacobian (IRVAE, ICLR 2022): keeps the latent geometry isotropic.
+  isometry:
+    weight: 0.0
+    subbatch: 64
+    epsilon: 0.01
+    alpha_jitter: 0.2
+    warmup_steps: 0
+    every: 1
 
 comet:
   mode: auto               # auto | online | offline | disabled

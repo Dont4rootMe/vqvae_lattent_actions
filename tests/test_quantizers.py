@@ -255,3 +255,34 @@ def test_vqema_caps_restarts_per_step_and_counts_them():
     assert capped.pop_restart_count() == 0                 # reading resets the counter
     assert free.pop_restart_count() > 3 * 4
     assert FSQ(levels=[4, 4]).pop_restart_count() == 0     # quantizers without restarts report none
+
+
+
+def test_vqema_gives_a_restarted_code_time_to_be_used():
+    """A restarted code restarted with its usage reset to 1. With many latents per step the floor sits above 1 (at 20
+    tokens on 8 GPUs it is 2), so the new code fell under it at once and was rewritten again on the next step: a
+    production run kept 735 codes churning on every step. A restarted code now starts at the average usage."""
+    torch.manual_seed(0)
+    centers = torch.randn(4, 3) * 5
+
+    def batch():                                              # 4 clusters, 16 codes: 12 codes always starve
+        idx = torch.randint(0, 4, (640,))
+        return (centers[idx] + 0.01 * torch.randn(640, 3)).view(1, 640, 3)
+
+    q = VQEMA(vocab_size=16, code_dim=3, decay=0.99, restart_ratio=0.1, seed_samples_per_code=1)
+    q.train()
+    for _ in range(300):                                      # past the first wave of restarts
+        q(batch())
+    q.pop_restart_count()
+    for _ in range(50):
+        q(batch())
+    assert q.pop_restart_count() <= 24                        # was 600: every starving code, every step
+
+    before = q.codebook.clone()
+    q.cluster_size[0] = 0.0                                   # force a restart of code 0
+    q(batch())
+    restarted = q.codebook[0].clone()
+    assert not torch.equal(restarted, before[0])
+    assert float(q.cluster_size[0]) >= float(q.cluster_size.mean()) * 0.5
+    q.eval()
+    q.train()

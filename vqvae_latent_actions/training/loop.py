@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ import torch
 from ..data.chunks import batch_to_inputs, layout_from_manifest, load_eval_set, train_loader
 from ..models.hier_tokenizer import HierActionTokenizer, HierTokenizerConfig
 from .augment import AugmentConfig, augment
+from .isometry import IsometryConfig
 from .comet import RunLogger
 from .evaluate import attention_logit_report, evaluate_tokenizer, model_report_extra, padding_invariance_mismatch
 from .metrics import write_report
@@ -47,6 +48,7 @@ class TrainConfig:
     # parameters whose name contains any of these get no weight decay (in addition to every 1-d parameter)
     no_decay_keywords: list[str] = field(default_factory=list)
     augment: dict[str, Any] = field(default_factory=dict)   # AugmentConfig fields; empty = off
+    isometry: dict[str, Any] = field(default_factory=dict)  # IsometryConfig fields; weight 0 = off
     comet: dict[str, Any] = field(default_factory=dict)
     run_name: str = "hier"
 
@@ -121,6 +123,9 @@ def train(cfg: TrainConfig) -> dict:
     device = accelerator.device
     set_seed(cfg.seed, device_specific=True)
     augment_cfg = AugmentConfig.from_dict(cfg.augment)          # validate before anything is written
+    isometry_cfg = IsometryConfig.from_dict(cfg.isometry)
+    # applied every Nth step, the penalty is scaled so the average pull over a schedule stays the same
+    isometry_step = replace(isometry_cfg, weight=isometry_cfg.weight * max(isometry_cfg.every, 1))
     out = Path(cfg.out_dir)
     if accelerator.is_main_process:
         out.mkdir(parents=True, exist_ok=True)
@@ -243,7 +248,9 @@ def train(cfg: TrainConfig) -> dict:
         actions, mask = augment(actions, mask, membership, augment_cfg, generator=augment_gen)
         quantize = step >= cfg.quantizer_warmup_steps
         with accelerator.autocast():
-            output = model(actions, mask, quantize=quantize)
+            output = model(actions, mask, quantize=quantize,
+                           isometry=isometry_step if isometry_cfg.active(step) else None,
+                           isometry_generator=augment_gen)
         accelerator.backward(output["loss"])
         grad_norm = None
         if cfg.grad_clip:
@@ -265,6 +272,9 @@ def train(cfg: TrainConfig) -> dict:
                       **scale_diagnostics(accelerator.unwrap_model(model), latents),
                       "grad_norm": float(grad_norm) if grad_norm is not None else float("nan"),
                       "codebook_restarts": accelerator.unwrap_model(model).quantizer.pop_restart_count(),
+                      # the decoder's Jacobian: how many latent directions it really uses, and the penalty itself
+                      "iso_loss": float(output.get("iso_loss", float("nan"))),
+                      "iso_participation_ratio": float(output.get("iso_participation_ratio", float("nan"))),
                       "lr": scheduler.get_last_lr()[0],
                       "chunks_seen": seen, "steps_per_s": cfg.log_every / max(time.time() - last_log, 1e-9),
                       "elapsed_s": resumed_elapsed + time.time() - start_time}
